@@ -1,309 +1,476 @@
-import { useState, type FormEvent } from "react";
-import { PROJECTS, type Eintrag, type Filter, type Prioritaet } from "./types";
-import { useEintraege } from "./useEintraege";
+// P08 ToDo-Ticket - Zusammenfuehrung der Ansichten.
+//
+// Die App kennt den Speicherort nur ueber die Repository-Schnittstelle. Der
+// Synchronisationszustand ist immer sichtbar (Kapitel 16); nicht gespeicherte
+// Aenderungen bleiben im lokalen Arbeitscache, damit offline nichts verloren geht.
 
-function todayISO(): string {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
-    d.getDate()
-  ).padStart(2, "0")}`;
-}
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Schnellerfassung, type NeuesTicket } from "./ui/Schnellerfassung";
+import { Filterleiste } from "./ui/Filterleiste";
+import { Ticketdetail, type DetailAktionen } from "./ui/Ticketdetail";
+import { Einstellungen } from "./ui/Einstellungen";
+import { Konfliktdialog } from "./ui/Konfliktdialog";
+import { Hinweise, Marke } from "./ui/Teile";
 
-function fmtDate(iso: string | null): string | null {
-  if (!iso) return null;
-  const [y, m, t] = iso.split("-");
-  return `${t}.${m}.${y}`;
-}
+import {
+  activeTasks,
+  activeTickets,
+  createAssignment,
+  createEvent,
+  createTask,
+  createTicket,
+  newId,
+  valueLabel,
+} from "./data/db";
+import { addNote, completeItem, completeWithFollowUp, confirmDelegation, redelegate, reopenItem, softDelete, updateItem } from "./data/actions";
+import { assistanceItems, delegationDueDate, hintsFor } from "./data/derive";
+import { LEERER_FILTER, suche, type FilterState } from "./data/filter";
+import { createEmptyDatabase } from "./data/db";
+import { formatDate, nowTimestamp, today } from "./data/dates";
+import { dateStamp, downloadBlob } from "./bausteine/B04-C07_Datei-Download";
+import { makeRepository, type Repository } from "./storage/repository";
+import { applyConflictResolutions, type FieldConflict } from "./storage/sync";
+import { clearPending, readPending, writePending } from "./storage/syncStore";
+import {
+  SELF_PERSON_ID,
+  type AssignmentKind,
+  type Database,
 
-function termineBadgeClass(t: string | null, status: Eintrag["status"]): string {
-  if (!t || status === "erledigt") return "";
-  const heute = todayISO();
-  if (t < heute) return "bad";
-  if (t === heute) return "warn";
-  return "";
-}
+  type ID,
+  type Rule,
+  type Task,
+  type Ticket,
+  type ValueItem,
+  type WorkItem,
+} from "./data/types";
 
-const TAB_LABELS: Record<Filter, string> = {
-  offen: "Offen",
-  ueberfaellig: "Überfällig",
-  heute: "Heute fällig",
-  erledigt: "Erledigt",
-  alle: "Alle",
-};
+type Ansicht = "assistenz" | "liste" | "einstellungen";
+type Speicherzustand = "geladen" | "speichert" | "gespeichert" | "offline" | "fehler";
+
+const SPEICHER_SCHLUESSEL = "p08_speicher";
+const CACHE_DATEI = "arbeitsstand";
 
 export default function App() {
-  const { view, filter, setFilter, conn, addEintrag, toggleDone, cycleStatus, pendingCount } =
-    useEintraege();
+  const [db, setDb] = useState<Database>(() => readPending(CACHE_DATEI) ?? createEmptyDatabase());
+  const [ansicht, setAnsicht] = useState<Ansicht>("assistenz");
+  const [filter, setFilter] = useState<FilterState>(LEERER_FILTER);
+  const [offenesTicket, setOffenesTicket] = useState<ID | null>(null);
+  const [speicherId, setSpeicherId] = useState<string>(() => localStorage.getItem(SPEICHER_SCHLUESSEL) ?? "local");
+  const [zustand, setZustand] = useState<Speicherzustand>("geladen");
+  const [meldung, setMeldung] = useState<string>("");
+  const [konflikte, setKonflikte] = useState<{ merged: Database; conflicts: FieldConflict[] } | null>(null);
+  const [angemeldet, setAngemeldet] = useState(false);
+  const [importVorschau, setImportVorschau] = useState<{ db: Database; meldungen: string[] } | null>(null);
 
-  const [titel, setTitel] = useState("");
-  const [projekt, setProjekt] = useState<string>(PROJECTS[0]);
-  const [lead, setLead] = useState("");
-  const [termin, setTermin] = useState("");
-  const [prioritaet, setPrioritaet] = useState<Prioritaet>("mittel");
-  const [ausloeser, setAusloeser] = useState("");
-  const [abstimmung, setAbstimmung] = useState("");
-  const [beschreibung, setBeschreibung] = useState("");
+  const repo = useMemo<Repository>(() => makeRepository(speicherId), [speicherId]);
+  const ersterLauf = useRef(true);
+  const speicherTimer = useRef<number | undefined>(undefined);
 
-  const heute = todayISO();
+  // Beim Start bzw. Speicherwechsel den vorhandenen Bestand laden.
+  useEffect(() => {
+    let abgebrochen = false;
+    (async () => {
+      try {
+        await repo.init();
+        setAngemeldet(repo.isSignedIn());
+        if (repo.needsSignIn() && !repo.isSignedIn()) {
+          setMeldung("Nicht angemeldet – es wird nur der lokale Arbeitsstand angezeigt.");
+          return;
+        }
+        const geladen = await repo.load();
+        if (abgebrochen) return;
+        if (geladen) {
+          setDb(geladen);
+          setMeldung("");
+        }
+        setZustand("geladen");
+      } catch (error) {
+        if (!abgebrochen) {
+          setZustand("fehler");
+          setMeldung(`Laden fehlgeschlagen: ${String(error)}. Vorhandene Daten bleiben unverändert.`);
+        }
+      }
+    })();
+    return () => {
+      abgebrochen = true;
+    };
+  }, [repo]);
 
-  const counts = {
-    offen: 0,
-    heute: 0,
-    ueberfaellig: 0,
-    erledigt: 0,
-    alle: view.length,
-  };
-  view.forEach((t) => {
-    if (t.status === "erledigt") {
-      counts.erledigt++;
+  // Jede Aenderung geht sofort in den lokalen Arbeitscache und verzoegert in
+  // die eigentliche Ablage - damit ueberlebt ein Neuladen ohne Verbindung.
+  useEffect(() => {
+    if (ersterLauf.current) {
+      ersterLauf.current = false;
       return;
     }
-    counts.offen++;
-    if (t.termin === heute) counts.heute++;
-    if (t.termin && t.termin < heute) counts.ueberfaellig++;
-  });
+    writePending(CACHE_DATEI, db);
+    window.clearTimeout(speicherTimer.current);
+    speicherTimer.current = window.setTimeout(() => void speichern(db), 800);
+    return () => window.clearTimeout(speicherTimer.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [db]);
 
-  const visible = view
-    .filter((t) => {
-      if (filter === "alle") return true;
-      if (filter === "erledigt") return t.status === "erledigt";
-      if (t.status === "erledigt") return false;
-      if (filter === "offen") return true;
-      if (filter === "heute") return t.termin === heute;
-      if (filter === "ueberfaellig") return !!t.termin && t.termin < heute;
-      return true;
-    })
-    .sort((a, b) => {
-      if (a.status === "erledigt" && b.status !== "erledigt") return 1;
-      if (b.status === "erledigt" && a.status !== "erledigt") return -1;
-      const at = a.termin || "9999", bt = b.termin || "9999";
-      if (at !== bt) return at < bt ? -1 : 1;
-      return (b.createdAt || "").localeCompare(a.createdAt || "");
-    });
+  const speichern = useCallback(
+    async (stand: Database) => {
+      if (repo.needsSignIn() && !repo.isSignedIn()) return;
+      setZustand("speichert");
+      try {
+        const ergebnis = await repo.save(stand);
+        if (ergebnis.status === "gespeichert") {
+          setZustand("gespeichert");
+          setMeldung("");
+          clearPending(CACHE_DATEI);
+          if (ergebnis.db !== stand) setDb(ergebnis.db);
+        } else if (ergebnis.status === "konflikt") {
+          setKonflikte({ merged: ergebnis.merged, conflicts: ergebnis.conflicts });
+          setZustand("fehler");
+        } else {
+          setZustand("offline");
+          setMeldung("Offline – Änderungen sind lokal gesichert und werden nachgereicht.");
+        }
+      } catch (error) {
+        setZustand("fehler");
+        setMeldung(`Speichern fehlgeschlagen: ${String(error)}`);
+      }
+    },
+    [repo],
+  );
 
-  function onSubmit(e: FormEvent) {
-    e.preventDefault();
-    const t = titel.trim();
-    if (!t) return;
-    addEintrag({
-      titel: t,
-      projekt,
-      lead: lead.trim(),
-      ausloeser: ausloeser.trim(),
-      abstimmung: abstimmung.trim(),
-      termin: termin || null,
-      prioritaet,
-      beschreibung: beschreibung.trim(),
+  // ---------------------------------------------------------------- Aktionen
+
+  function anlegen(eingabe: NeuesTicket) {
+    const ticket = createTicket(eingabe.title, {
+      description: eingabe.description,
+      leadId: eingabe.leadId,
+      dueDate: eingabe.dueDate,
+      priority: eingabe.priority,
+      trigger: eingabe.trigger,
     });
-    setTitel("");
-    setLead("");
-    setTermin("");
-    setPrioritaet("mittel");
-    setAusloeser("");
-    setAbstimmung("");
-    setBeschreibung("");
+    const mitFrist =
+      eingabe.leadId === SELF_PERSON_ID
+        ? ticket
+        : {
+            ...ticket,
+            delegationRequiredAt: nowTimestamp(),
+            delegationDueDate: delegationDueDate(db, ticket, today()),
+          };
+
+    const zuordnungen = [
+      ...eingabe.projekte.map((id) => createAssignment("Ticket", ticket.id, "Projekt", id)),
+      ...eingabe.abstimmungMit.map((id) => createAssignment("Ticket", ticket.id, "Abstimmung mit", id)),
+    ];
+
+    setDb((stand) => ({
+      ...stand,
+      tickets: [...stand.tickets, mitFrist],
+      assignments: [...stand.assignments, ...zuordnungen],
+      events: [...stand.events, createEvent("Ticket", ticket.id, "Erfassung", "Ticket erfasst")],
+      meta: { ...stand.meta, dataRevision: stand.meta.dataRevision + 1 },
+    }));
+  }
+
+  const aktionen: DetailAktionen = {
+    aendern: (type, id, patch) => setDb((stand) => updateItem(stand, type, id, patch)),
+    zuordnen: (type, id, kind: AssignmentKind, valueIds) =>
+      setDb((stand) => {
+        const stamp = nowTimestamp();
+        const bestehend = stand.assignments.filter((a) => a.entityId === id && a.kind === kind && !a.deletedAt);
+        const entfernt = bestehend.filter((a) => !valueIds.includes(a.valueId)).map((a) => a.id);
+        const vorhandene = bestehend.map((a) => a.valueId);
+        const neue = valueIds
+          .filter((valueId) => !vorhandene.includes(valueId))
+          .map((valueId) => createAssignment(type, id, kind, valueId));
+        return {
+          ...stand,
+          assignments: [
+            ...stand.assignments.map((a) => (entfernt.includes(a.id) ? { ...a, deletedAt: stamp } : a)),
+            ...neue,
+          ],
+          meta: { ...stand.meta, dataRevision: stand.meta.dataRevision + 1 },
+        };
+      }),
+    delegationBestaetigen: (type, id, empfaengerId, text) =>
+      setDb((stand) => confirmDelegation(stand, type, id, empfaengerId, text)),
+    erneutDelegieren: (type, id) => setDb((stand) => redelegate(stand, type, id)),
+    abschliessen: (type, id, ergebnis) =>
+      setDb((stand) => {
+        const ergebnisse = completeItem(stand, type, id, ergebnis);
+        if (ergebnisse.blockedBy) {
+          setMeldung(`Abschluss gestoppt: ${ergebnisse.blockedBy.length} offene Aufgabe(n) (Regel A03).`);
+          return stand;
+        }
+        return ergebnisse.db;
+      }),
+    wiederOeffnen: (type, id) => setDb((stand) => reopenItem(stand, type, id)),
+    aufgabeAnlegen: (ticketId, titel) =>
+      setDb((stand) => {
+        const task = createTask(ticketId, titel);
+        return {
+          ...stand,
+          tasks: [...stand.tasks, task],
+          events: [...stand.events, createEvent("Aufgabe", task.id, "Erfassung", "Aufgabe erfasst")],
+          meta: { ...stand.meta, dataRevision: stand.meta.dataRevision + 1 },
+        };
+      }),
+    folgeaufgabe: (taskId, titel, ergebnis) =>
+      setDb((stand) => completeWithFollowUp(stand, taskId, { title: titel }, ergebnis)),
+    notiz: (type, id, text) => setDb((stand) => addNote(stand, type, id, text)),
+    loeschen: (type, id) => {
+      setDb((stand) => softDelete(stand, type, id));
+      if (type === "Ticket") setOffenesTicket(null);
+    },
+  };
+
+  // ------------------------------------------------------------- Sicherung
+
+  function exportJson() {
+    const blob = new Blob([JSON.stringify({ ...db, meta: { ...db.meta, generatedAt: nowTimestamp() } }, null, 2)], {
+      type: "application/json",
+    });
+    downloadBlob(blob, `P08_ToDo-Ticket Daten_V01-00_${dateStamp()}_AI.json`);
+  }
+
+  async function exportExcelDatei() {
+    // exceljs wird erst beim tatsaechlichen Export geladen - das haelt den
+    // Start am Handy klein (die Bibliothek ist der groesste Einzelposten).
+    const { exportExcel } = await import("./export/excel");
+    const blob = await exportExcel(db);
+    downloadBlob(blob, `P08_ToDo-Ticket Snapshot_V01-00_${dateStamp()}_AI.xlsx`);
+  }
+
+  async function importDatei(datei: File) {
+    try {
+      if (datei.name.toLowerCase().endsWith(".json")) {
+        const text = await datei.text();
+        const geladen = JSON.parse(text) as Database;
+        if (!geladen.tickets || !geladen.meta) throw new Error("Kein gültiger P08-Datenbestand.");
+        setImportVorschau({ db: geladen, meldungen: [] });
+      } else {
+        const puffer = await datei.arrayBuffer();
+        const { importExcel } = await import("./export/excel");
+        const bericht = await importExcel(puffer, db);
+        if (bericht.db) setImportVorschau({ db: bericht.db, meldungen: bericht.meldungen });
+      }
+    } catch (error) {
+      setMeldung(`Wiederherstellung abgebrochen: ${String(error)}. Der vorhandene Stand bleibt unverändert.`);
+    }
+  }
+
+  // ------------------------------------------------------------- Ansichten
+
+  const ticket = offenesTicket ? db.tickets.find((t) => t.id === offenesTicket) : undefined;
+  const treffer = useMemo(() => suche(db, filter), [db, filter]);
+  const assistenz = useMemo(
+    () => assistanceItems(db, activeTickets(db), activeTasks(db)).slice(0, 30),
+    [db],
+  );
+  const projektVorschlag = filter.projekte;
+
+  function titelVon(item: WorkItem): { titel: string; zusatz: string; ticketId: ID } {
+    const alsAufgabe = db.tasks.find((t) => t.id === item.id);
+    if (alsAufgabe) {
+      const eltern = db.tickets.find((t) => t.id === alsAufgabe.ticketId);
+      return { titel: item.title, zusatz: eltern ? `Ticket: ${eltern.title}` : "", ticketId: alsAufgabe.ticketId };
+    }
+    return { titel: item.title, zusatz: "", ticketId: item.id };
   }
 
   return (
-    <div className="wrap">
-      <header className="top">
-        <h1>
-          ToDo-Liste_Ticket
-          <small>Offene Punkte, Termine, Zuständigkeiten &mdash; ZNA · LAB · KFN · WHF</small>
-        </h1>
-        <div className={`conn${conn === "offline" ? " offline" : ""}`}>
-          <span className="dot" />
-          <span>
-            {conn === "online"
-              ? "synchronisiert"
-              : conn === "offline"
-              ? pendingCount
-                ? `offline · ${pendingCount} ungespeichert`
-                : "offline · lokal gespeichert"
-              : "verbindet…"}
-          </span>
+    <div className="app">
+      <header className="kopf">
+        <h1>P08 ToDo-Ticket</h1>
+        <div className="zeile">
+          <nav className="reiter">
+            <button type="button" aria-pressed={ansicht === "assistenz"} onClick={() => { setAnsicht("assistenz"); setOffenesTicket(null); }}>
+              Als Nächstes
+            </button>
+            <button type="button" aria-pressed={ansicht === "liste"} onClick={() => { setAnsicht("liste"); setOffenesTicket(null); }}>
+              Suchen
+            </button>
+            <button type="button" aria-pressed={ansicht === "einstellungen"} onClick={() => { setAnsicht("einstellungen"); setOffenesTicket(null); }}>
+              Einstellungen
+            </button>
+          </nav>
+        </div>
+        <div className="status-zeile" style={{ marginTop: 6 }}>
+          <span className={`punkt ${zustand === "gespeichert" || zustand === "geladen" ? "ok" : zustand === "fehler" ? "warn" : "aus"}`} />
+          {speicherId === "onedrive" ? "OneDrive" : "Nur dieses Gerät"} ·{" "}
+          {zustand === "speichert"
+            ? "speichert …"
+            : zustand === "gespeichert"
+              ? "gespeichert"
+              : zustand === "offline"
+                ? "offline, lokal gesichert"
+                : zustand === "fehler"
+                  ? "nicht gespeichert"
+                  : "geladen"}
         </div>
       </header>
 
-      <div className="card">
-        <form className="add" onSubmit={onSubmit}>
-          <div className="row">
-            <div className="field grow">
-              <label htmlFor="f-titel">Titel</label>
-              <input
-                id="f-titel"
-                required
-                placeholder="z.B. Kanalschaden Baustelle Nordseite"
-                autoComplete="off"
-                value={titel}
-                onChange={(e) => setTitel(e.target.value)}
-              />
-            </div>
-            <div className="field">
-              <label htmlFor="f-projekt">Projekt</label>
-              <select id="f-projekt" value={projekt} onChange={(e) => setProjekt(e.target.value)}>
-                {PROJECTS.map((p) => (
-                  <option key={p} value={p}>
-                    {p}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
-          <div className="row">
-            <div className="field">
-              <label htmlFor="f-lead">Lead</label>
-              <input
-                id="f-lead"
-                placeholder="z.B. CLS"
-                autoComplete="off"
-                value={lead}
-                onChange={(e) => setLead(e.target.value)}
-              />
-            </div>
-            <div className="field">
-              <label htmlFor="f-termin">Soll-Termin</label>
-              <input
-                id="f-termin"
-                type="date"
-                value={termin}
-                onChange={(e) => setTermin(e.target.value)}
-              />
-            </div>
-            <div className="field">
-              <label htmlFor="f-prio">Priorität</label>
-              <select
-                id="f-prio"
-                value={prioritaet}
-                onChange={(e) => setPrioritaet(e.target.value as Prioritaet)}
-              >
-                <option value="mittel">Mittel</option>
-                <option value="hoch">Hoch</option>
-                <option value="niedrig">Niedrig</option>
-              </select>
-            </div>
-          </div>
-          <div className="row">
-            <div className="field">
-              <label htmlFor="f-ausloeser">
-                Auslöser <span style={{ textTransform: "none", fontWeight: 500 }}>(optional)</span>
-              </label>
-              <input
-                id="f-ausloeser"
-                placeholder="Wer hat das ausgelöst?"
-                autoComplete="off"
-                value={ausloeser}
-                onChange={(e) => setAusloeser(e.target.value)}
-              />
-            </div>
-            <div className="field">
-              <label htmlFor="f-abstimmung">
-                Abstimmung mit{" "}
-                <span style={{ textTransform: "none", fontWeight: 500 }}>(optional)</span>
-              </label>
-              <input
-                id="f-abstimmung"
-                placeholder="Mit wem ggf. abstimmen"
-                autoComplete="off"
-                value={abstimmung}
-                onChange={(e) => setAbstimmung(e.target.value)}
-              />
-            </div>
-          </div>
-          <div className="field">
-            <label htmlFor="f-beschreibung">
-              Beschreibung{" "}
-              <span style={{ textTransform: "none", fontWeight: 500 }}>(optional)</span>
-            </label>
-            <textarea
-              id="f-beschreibung"
-              placeholder="Details, wer meldet…"
-              value={beschreibung}
-              onChange={(e) => setBeschreibung(e.target.value)}
-            />
-          </div>
-          <button className="primary" type="submit">
-            Aufgabe eintragen
+      {meldung && (
+        <div className={`hinweis ${zustand === "fehler" ? "dringend" : "info"}`}>
+          {meldung}
+          <button type="button" className="zweit" style={{ marginLeft: 8 }} onClick={() => setMeldung("")}>
+            OK
           </button>
-        </form>
-      </div>
+        </div>
+      )}
 
-      <div className="tabs" role="tablist">
-        {(Object.keys(TAB_LABELS) as Filter[]).map((key) => (
-          <button
-            key={key}
-            className="tab"
-            role="tab"
-            aria-pressed={filter === key}
-            onClick={() => setFilter(key)}
-          >
-            {TAB_LABELS[key]} <span className="count">{counts[key]}</span>
-          </button>
-        ))}
-      </div>
-
-      <ul className="eintraege">
-        {visible.length === 0 ? (
-          <div className="empty">
-            <strong>Nichts zu tun</strong>In dieser Ansicht liegt gerade keine Aufgabe.
-          </div>
-        ) : (
-          visible.map((t) => {
-            const tbClass = termineBadgeClass(t.termin, t.status);
-            const statusLabel =
-              t.status === "offen" ? "Offen" : t.status === "in_bearbeitung" ? "In Bearbeitung" : "Erledigt";
-            const nextStatus =
-              t.status === "offen" ? "in_bearbeitung" : t.status === "in_bearbeitung" ? "erledigt" : "offen";
-            const nextLabel =
-              t.status === "offen"
-                ? "→ In Bearbeitung"
-                : t.status === "in_bearbeitung"
-                ? "→ Erledigt"
-                : "→ Wieder öffnen";
-            return (
-              <li key={t.id} className={`eintrag${t.status === "erledigt" ? " erledigt" : ""}`}>
-                <button
-                  className="check"
-                  aria-label="Erledigt markieren"
-                  onClick={() => toggleDone(t.id)}
-                >
-                  {t.status === "erledigt" ? "✓" : ""}
-                </button>
-                <div className="body2">
-                  <div className="titel-row">
-                    <span className="titel">{t.titel}</span>
-                    {t.vorgangsnummer && <span className="vnr">{t.vorgangsnummer}</span>}
+      {ticket ? (
+        <Ticketdetail db={db} ticket={ticket} aktionen={aktionen} onZurueck={() => setOffenesTicket(null)} />
+      ) : ansicht === "einstellungen" ? (
+        <Einstellungen
+          db={db}
+          speicherId={speicherId}
+          angemeldet={angemeldet}
+          onSpeicherWechsel={(id) => {
+            localStorage.setItem(SPEICHER_SCHLUESSEL, id);
+            setSpeicherId(id);
+          }}
+          onAnmelden={async () => {
+            try {
+              await repo.signIn();
+              setAngemeldet(true);
+              const geladen = await repo.load();
+              if (geladen) setDb(geladen);
+              setMeldung("");
+            } catch (error) {
+              setMeldung(`Anmeldung fehlgeschlagen: ${String(error)}`);
+            }
+          }}
+          onAbmelden={async () => {
+            await repo.signOut();
+            setAngemeldet(false);
+          }}
+          onRegelAendern={(rule: Rule) =>
+            setDb((stand) => ({ ...stand, rules: stand.rules.map((r) => (r.id === rule.id ? rule : r)) }))
+          }
+          onWertAnlegen={(gruppe, label) =>
+            setDb((stand) => ({
+              ...stand,
+              values: [
+                ...stand.values,
+                {
+                  id: newId(),
+                  group: gruppe as ValueItem["group"],
+                  label,
+                  aliases: [],
+                  active: true,
+                  sortOrder: stand.values.filter((v) => v.group === gruppe).length,
+                },
+              ],
+            }))
+          }
+          onWertAendern={(wert) =>
+            setDb((stand) => ({ ...stand, values: stand.values.map((v) => (v.id === wert.id ? wert : v)) }))
+          }
+          onExportJson={exportJson}
+          onExportExcel={() => void exportExcelDatei()}
+          onImport={(datei) => void importDatei(datei)}
+        />
+      ) : ansicht === "assistenz" ? (
+        <>
+          <Schnellerfassung db={db} projektVorschlag={projektVorschlag} onAnlegen={anlegen} />
+          <div className="karte">
+            <h2 style={{ fontSize: 16, marginTop: 0 }}>Als Nächstes</h2>
+            {assistenz.length === 0 && <div className="leer">Nichts offen.</div>}
+            {assistenz.map(({ item, hints, reason }) => {
+              const { titel, zusatz, ticketId } = titelVon(item);
+              return (
+                <div key={item.id} className="eintrag" onClick={() => setOffenesTicket(ticketId)}>
+                  <div className="kopfzeile">
+                    <span className="titel">{titel}</span>
+                    <Marke>{valueLabel(db, item.leadId)}</Marke>
                   </div>
-                  <div className="meta">
-                    <span className="badge">{t.projekt}</span>
-                    {t.lead && <span className="badge">Lead: {t.lead}</span>}
-                    {t.ausloeser && <span className="badge">Auslöser: {t.ausloeser}</span>}
-                    {t.abstimmung && <span className="badge">Abstimmen mit: {t.abstimmung}</span>}
-                    {t.termin && (
-                      <span className={`badge termin ${tbClass}`}>{fmtDate(t.termin)}</span>
-                    )}
-                    {t.prioritaet === "hoch" && <span className="badge prio-hoch">Hoch</span>}
-                    {(t as Eintrag & { _pending?: boolean })._pending && (
-                      <span className="badge">⏳ wird synchronisiert</span>
-                    )}
-                    <span className="badge" style={{ opacity: 0.75 }}>
-                      {statusLabel}
-                    </span>
+                  <div className="grund">
+                    {reason}
+                    {zusatz ? ` · ${zusatz}` : ""}
                   </div>
-                  {t.beschreibung && <div className="beschreibung">{t.beschreibung}</div>}
-                  <button className="statusbtn" onClick={() => cycleStatus(t.id, nextStatus)}>
-                    {nextLabel}
-                  </button>
+                  <Hinweise hints={hints} />
                 </div>
-              </li>
-            );
-          })
-        )}
-      </ul>
+              );
+            })}
+          </div>
+        </>
+      ) : (
+        <>
+          <Filterleiste db={db} filter={filter} onChange={setFilter} />
+          <div className="karte">
+            <div className="status-zeile" style={{ marginBottom: 6 }}>
+              {treffer.length} Ticket{treffer.length === 1 ? "" : "s"}
+            </div>
+            {treffer.length === 0 && <div className="leer">Nichts gefunden.</div>}
+            {treffer.map(({ ticket: t, aufgaben, ticketPasst }) => (
+              <div key={t.id} className={`eintrag${t.status === "Erledigt" ? " erledigt" : ""}`} onClick={() => setOffenesTicket(t.id)}>
+                <div className="kopfzeile">
+                  <span className="titel">{t.title}</span>
+                  <Marke>{t.status}</Marke>
+                </div>
+                <div className="grund">
+                  {valueLabel(db, t.leadId)}
+                  {t.dueDate ? ` · Solltermin ${formatDate(t.dueDate)}` : ""}
+                  {!ticketPasst ? " · Treffer in Aufgaben" : ""}
+                </div>
+                <Hinweise hints={hintsFor(db, t)} />
+                {aufgaben.map((task: Task) => (
+                  <div key={task.id} className="grund" style={{ paddingLeft: 12 }}>
+                    ↳ {task.title} · {valueLabel(db, task.leadId)}
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
 
-      <footer className="note">
-        P08 &middot; Synchronisiert automatisch über alle deine Geräte, solange eine Verbindung besteht.
-      </footer>
+      {konflikte && (
+        <Konfliktdialog
+          conflicts={konflikte.conflicts}
+          onEntscheiden={async (entscheidungen) => {
+            const aufgeloest = applyConflictResolutions(konflikte.merged, konflikte.conflicts, entscheidungen);
+            setKonflikte(null);
+            setDb(aufgeloest);
+            await repo.force(aufgeloest);
+            setZustand("gespeichert");
+          }}
+          onAbbrechen={() => setKonflikte(null)}
+        />
+      )}
+
+      {importVorschau && (
+        <dialog open>
+          <h2>Wiederherstellen</h2>
+          <div className="hinweis warnung">
+            Der aktuelle Stand wird ersetzt. {importVorschau.db.tickets.length} Tickets,{" "}
+            {importVorschau.db.tasks.length} Aufgaben, {importVorschau.db.events.length} Verlaufseinträge.
+          </div>
+          {importVorschau.meldungen.length > 0 && (
+            <ul style={{ fontSize: 14 }}>
+              {importVorschau.meldungen.slice(0, 20).map((m, i) => (
+                <li key={i}>{m}</li>
+              ))}
+            </ul>
+          )}
+          <div className="knopfreihe">
+            <button
+              type="button"
+              className="haupt"
+              onClick={() => {
+                exportJson(); // Sicherung des bisherigen Stands vor dem Ersetzen
+                setDb(importVorschau.db);
+                setImportVorschau(null);
+              }}
+            >
+              Übernehmen (bisheriger Stand wird vorher heruntergeladen)
+            </button>
+            <button type="button" className="zweit" onClick={() => setImportVorschau(null)}>
+              Abbrechen
+            </button>
+          </div>
+        </dialog>
+      )}
     </div>
   );
 }
+
+export type { Ticket };
