@@ -6,6 +6,7 @@
 
 import { useState } from "react";
 import { Feld, Hinweise, Marke, Mehrfachauswahl } from "./Teile";
+import { Personenfeld, Personenmehrfachfeld } from "./Personenfeld";
 import { Delegationsdialog } from "./Delegation";
 import { effectiveAssignments, hintsFor, isOpen, needsDelegation } from "../data/derive";
 import { assignmentsOf, eventsOf, tasksOfTicket, valueLabel, valuesOfGroup } from "../data/db";
@@ -35,6 +36,8 @@ export interface DetailAktionen {
   folgeaufgabe: (taskId: ID, titel: string, ergebnis: string) => void;
   notiz: (type: EntityType, id: ID, text: string) => void;
   loeschen: (type: EntityType, id: ID) => void;
+  /** Legt eine neue Person an und liefert deren ID sofort zurueck. */
+  personAnlegen: (label: string) => ID;
 }
 
 function Kopfdaten({
@@ -48,17 +51,17 @@ function Kopfdaten({
   item: WorkItem;
   aktionen: DetailAktionen;
 }) {
-  const personen = valuesOfGroup(db, "Person");
   return (
     <div className="feldgitter">
       <Feld label="Lead">
-        <select value={item.leadId} onChange={(event) => aktionen.aendern(type, item.id, { leadId: event.target.value })}>
-          {personen.map((person) => (
-            <option key={person.id} value={person.id}>
-              {person.label}
-            </option>
-          ))}
-        </select>
+        <Personenfeld
+          db={db}
+          wert={item.leadId}
+          onChange={(id) => aktionen.aendern(type, item.id, { leadId: id ?? SELF_PERSON_ID })}
+          aktionen={{ anlegen: aktionen.personAnlegen }}
+          listenId={`personen-lead-${item.id}`}
+          pflicht
+        />
       </Feld>
       <Feld label="Solltermin">
         <input
@@ -125,13 +128,25 @@ function Zuordnungen({
     <div style={{ display: "grid", gap: 10 }}>
       {ASSIGNMENT_KINDS.map((kind) => {
         const geerbt = effektiv.filter((a) => a.kind === kind && a.origin === "Ticket");
+        const gewaehlt = eigene.filter((a) => a.kind === kind).map((a) => a.valueId);
+        const istPersonenart = gruppeZuArt[kind] === "Person";
         return (
           <Feld key={kind} label={kind}>
-            <Mehrfachauswahl
-              optionen={valuesOfGroup(db, gruppeZuArt[kind]).map((v) => ({ id: v.id, label: v.label }))}
-              gewaehlt={eigene.filter((a) => a.kind === kind).map((a) => a.valueId)}
-              onChange={(ids) => aktionen.zuordnen(type, item.id, kind, ids)}
-            />
+            {istPersonenart ? (
+              <Personenmehrfachfeld
+                db={db}
+                werte={gewaehlt}
+                onChange={(ids) => aktionen.zuordnen(type, item.id, kind, ids)}
+                aktionen={{ anlegen: aktionen.personAnlegen }}
+                listenId={`personen-${kind.replace(/\s+/g, "-")}-${item.id}`}
+              />
+            ) : (
+              <Mehrfachauswahl
+                optionen={valuesOfGroup(db, gruppeZuArt[kind]).map((v) => ({ id: v.id, label: v.label }))}
+                gewaehlt={gewaehlt}
+                onChange={(ids) => aktionen.zuordnen(type, item.id, kind, ids)}
+              />
+            )}
             {type === "Aufgabe" && geerbt.length > 0 && (
               <div className="marken">
                 {geerbt.map((a) => (
@@ -491,6 +506,7 @@ export function Ticketdetail({
             aktionen.delegationBestaetigen(delegation.type, delegation.item.id, empfaengerId, text)
           }
           onSchliessen={() => setDelegation(null)}
+          onPersonAnlegen={aktionen.personAnlegen}
         />
       )}
     </div>

@@ -4,7 +4,7 @@
 // Synchronisationszustand ist immer sichtbar (Kapitel 16); nicht gespeicherte
 // Aenderungen bleiben im lokalen Arbeitscache, damit offline nichts verloren geht.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Schnellerfassung, type NeuesTicket } from "./ui/Schnellerfassung";
 import { Filterleiste } from "./ui/Filterleiste";
 import { Ticketdetail, type DetailAktionen } from "./ui/Ticketdetail";
@@ -30,8 +30,11 @@ import { formatDate, nowTimestamp, today } from "./data/dates";
 import { dateStamp, downloadBlob } from "./bausteine/B04-C07_Datei-Download";
 import { makeRepository, type Repository } from "./storage/repository";
 import { applyConflictResolutions, type FieldConflict } from "./storage/sync";
-import { clearPending, readPending, writePending } from "./storage/syncStore";
+import { clearPending, readBaseline, readPending, writePending } from "./storage/syncStore";
+import { Speicherwerk, zustandText, type Anzeige, type Zwischenspeicher } from "./storage/speicherwerk";
+import { DATA_FILE } from "./storage/onedrive";
 import {
+  APP_VERSION,
   SELF_PERSON_ID,
   type AssignmentKind,
   type Database,
@@ -45,10 +48,11 @@ import {
 } from "./data/types";
 
 type Ansicht = "assistenz" | "liste" | "einstellungen";
-type Speicherzustand = "geladen" | "speichert" | "gespeichert" | "offline" | "fehler";
 
 const SPEICHER_SCHLUESSEL = "p08_speicher";
-const CACHE_DATEI = "arbeitsstand";
+// Zwischenspeicher und Baseline muessen denselben Schluessel benutzen, sonst
+// findet der Abgleich beim Laden nie eine gemeinsame Ausgangsfassung.
+const CACHE_DATEI = DATA_FILE;
 
 export default function App() {
   const [db, setDb] = useState<Database>(() => readPending(CACHE_DATEI) ?? createEmptyDatabase());
@@ -56,85 +60,87 @@ export default function App() {
   const [filter, setFilter] = useState<FilterState>(LEERER_FILTER);
   const [offenesTicket, setOffenesTicket] = useState<ID | null>(null);
   const [speicherId, setSpeicherId] = useState<string>(() => localStorage.getItem(SPEICHER_SCHLUESSEL) ?? "local");
-  const [zustand, setZustand] = useState<Speicherzustand>("geladen");
+  const [anzeige, setAnzeige] = useState<Anzeige>({ zustand: "geladen", meldung: "", wiederholbar: false });
   const [meldung, setMeldung] = useState<string>("");
+  const [entscheidung, setEntscheidung] = useState<{ lokal: Database; fern: Database } | null>(null);
   const [konflikte, setKonflikte] = useState<{ merged: Database; conflicts: FieldConflict[] } | null>(null);
   const [angemeldet, setAngemeldet] = useState(false);
   const [importVorschau, setImportVorschau] = useState<{ db: Database; meldungen: string[] } | null>(null);
 
   const repo = useMemo<Repository>(() => makeRepository(speicherId), [speicherId]);
-  const ersterLauf = useRef(true);
-  const speicherTimer = useRef<number | undefined>(undefined);
+  const bereit = useRef(false);
+  /** Namen, die in diesem Zug angelegt wurden, bevor der Zustand nachgezogen hat. */
+  const frischAngelegt = useRef(new Map<string, ID>());
 
-  // Beim Start bzw. Speicherwechsel den vorhandenen Bestand laden.
+  const cache = useMemo<Zwischenspeicher>(
+    () => ({
+      schreibe: (stand: Database) => writePending(CACHE_DATEI, stand),
+      lies: () => readPending(CACHE_DATEI),
+      leere: () => clearPending(CACHE_DATEI),
+      basis: () => readBaseline(CACHE_DATEI),
+    }),
+    [],
+  );
+
+  // Das Speicherwerk haelt die Reihenfolge ein: hoechstens ein laufender
+  // Vorgang, Bestaetigung nur fuer den tatsaechlich geschriebenen Stand.
+  const werk = useMemo(
+    () =>
+      new Speicherwerk(
+        repo,
+        cache,
+        setAnzeige,
+        (zusammengefuehrt) => setDb(zusammengefuehrt),
+        (merged, conflicts) => setKonflikte({ merged, conflicts }),
+      ),
+    [repo, cache],
+  );
+
+  // Beim Start bzw. Speicherwechsel laden - und dabei ungesicherte lokale
+  // Aenderungen beruecksichtigen statt sie zu ueberschreiben.
   useEffect(() => {
     let abgebrochen = false;
+    bereit.current = false;
     (async () => {
       try {
         await repo.init();
+        if (abgebrochen) return;
         setAngemeldet(repo.isSignedIn());
         if (repo.needsSignIn() && !repo.isSignedIn()) {
-          setMeldung("Nicht angemeldet – es wird nur der lokale Arbeitsstand angezeigt.");
+          setMeldung("Nicht angemeldet – Änderungen werden lokal gesichert und später übertragen.");
+          setAnzeige({ zustand: "ausstehend", meldung: "", wiederholbar: false });
+          bereit.current = true;
           return;
         }
-        const geladen = await repo.load();
+        const ergebnis = await werk.laden();
         if (abgebrochen) return;
-        if (geladen) {
-          setDb(geladen);
+        if (ergebnis.art === "stand") {
+          if (ergebnis.db) setDb(ergebnis.db);
           setMeldung("");
+        } else if (ergebnis.art === "konflikt") {
+          setKonflikte({ merged: ergebnis.merged, conflicts: ergebnis.conflicts });
+        } else if (ergebnis.art === "entscheidung") {
+          setEntscheidung({ lokal: ergebnis.lokal, fern: ergebnis.fern });
+        } else {
+          setMeldung(`${ergebnis.meldung}. Vorhandene Daten bleiben unverändert.`);
         }
-        setZustand("geladen");
       } catch (error) {
-        if (!abgebrochen) {
-          setZustand("fehler");
-          setMeldung(`Laden fehlgeschlagen: ${String(error)}. Vorhandene Daten bleiben unverändert.`);
-        }
+        if (!abgebrochen) setMeldung(`Laden fehlgeschlagen: ${String(error)}. Vorhandene Daten bleiben unverändert.`);
+      } finally {
+        if (!abgebrochen) bereit.current = true;
       }
     })();
     return () => {
       abgebrochen = true;
     };
-  }, [repo]);
+  }, [repo, werk]);
 
-  // Jede Aenderung geht sofort in den lokalen Arbeitscache und verzoegert in
-  // die eigentliche Ablage - damit ueberlebt ein Neuladen ohne Verbindung.
+  // Jede uebernommene Aenderung geht sofort in den lokalen Zwischenspeicher
+  // und von dort geordnet in die Ablage.
   useEffect(() => {
-    if (ersterLauf.current) {
-      ersterLauf.current = false;
-      return;
-    }
-    writePending(CACHE_DATEI, db);
-    window.clearTimeout(speicherTimer.current);
-    speicherTimer.current = window.setTimeout(() => void speichern(db), 800);
-    return () => window.clearTimeout(speicherTimer.current);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [db]);
-
-  const speichern = useCallback(
-    async (stand: Database) => {
-      if (repo.needsSignIn() && !repo.isSignedIn()) return;
-      setZustand("speichert");
-      try {
-        const ergebnis = await repo.save(stand);
-        if (ergebnis.status === "gespeichert") {
-          setZustand("gespeichert");
-          setMeldung("");
-          clearPending(CACHE_DATEI);
-          if (ergebnis.db !== stand) setDb(ergebnis.db);
-        } else if (ergebnis.status === "konflikt") {
-          setKonflikte({ merged: ergebnis.merged, conflicts: ergebnis.conflicts });
-          setZustand("fehler");
-        } else {
-          setZustand("offline");
-          setMeldung("Offline – Änderungen sind lokal gesichert und werden nachgereicht.");
-        }
-      } catch (error) {
-        setZustand("fehler");
-        setMeldung(`Speichern fehlgeschlagen: ${String(error)}`);
-      }
-    },
-    [repo],
-  );
+    if (!bereit.current) return;
+    werk.aendern(db);
+  }, [db, werk]);
 
   // ---------------------------------------------------------------- Aktionen
 
@@ -219,7 +225,52 @@ export default function App() {
       setDb((stand) => softDelete(stand, type, id));
       if (type === "Ticket") setOffenesTicket(null);
     },
+    personAnlegen: (label: string) => personAnlegen(label),
   };
+
+  /** Legt eine Person an und liefert die ID SOFORT zurueck. Die Kennung wird
+   *  vorab erzeugt, damit das aufrufende Feld sie ohne Umweg verwenden kann -
+   *  React setzt den Zustand erst danach fort.
+   *
+   *  Die Merkliste `frischAngelegt` ist notwendig, weil dieselbe Eingabe in
+   *  einem Zug zweimal ankommen kann (Eingabetaste und anschliessendes
+   *  Verlassen des Feldes). Ohne sie entstuende beim zweiten Aufruf eine
+   *  zweite Kennung, die der Dublettenschutz im Zustand verwirft - der Lead
+   *  zeigte dann auf eine Person, die es nicht gibt. */
+  function personAnlegen(label: string): ID {
+    const schluessel = label.trim().replace(/\s+/g, " ").toLowerCase();
+    const vorhanden = db.values.find(
+      (wert) => wert.group === "Person" && wert.label.trim().replace(/\s+/g, " ").toLowerCase() === schluessel,
+    );
+    if (vorhanden) return vorhanden.id;
+    const schonAngelegt = frischAngelegt.current.get(schluessel);
+    if (schonAngelegt) return schonAngelegt;
+
+    const id = newId();
+    frischAngelegt.current.set(schluessel, id);
+    setDb((stand) => {
+      // Zwischenzeitlich schon angelegt? Dann nichts doppelt schreiben.
+      const bereits = stand.values.find(
+        (wert) => wert.group === "Person" && wert.label.trim().replace(/\s+/g, " ").toLowerCase() === schluessel,
+      );
+      if (bereits) return stand;
+      return {
+        ...stand,
+        values: [
+          ...stand.values,
+          {
+            id,
+            group: "Person" as const,
+            label,
+            aliases: [],
+            active: true,
+            sortOrder: stand.values.filter((v) => v.group === "Person").length,
+          },
+        ],
+      };
+    });
+    return id;
+  }
 
   // ------------------------------------------------------------- Sicherung
 
@@ -278,7 +329,12 @@ export default function App() {
   return (
     <div className="app">
       <header className="kopf">
-        <h1>P08 ToDo-Ticket</h1>
+        <h1>
+          P08 ToDo-Ticket{" "}
+          <span className="fassung" title={`Programmfassung ${APP_VERSION}`}>
+            {APP_VERSION}
+          </span>
+        </h1>
         <div className="zeile">
           <nav className="reiter">
             <button type="button" aria-pressed={ansicht === "assistenz"} onClick={() => { setAnsicht("assistenz"); setOffenesTicket(null); }}>
@@ -293,22 +349,31 @@ export default function App() {
           </nav>
         </div>
         <div className="status-zeile" style={{ marginTop: 6 }}>
-          <span className={`punkt ${zustand === "gespeichert" || zustand === "geladen" ? "ok" : zustand === "fehler" ? "warn" : "aus"}`} />
-          {speicherId === "onedrive" ? "OneDrive" : "Nur dieses Gerät"} ·{" "}
-          {zustand === "speichert"
-            ? "speichert …"
-            : zustand === "gespeichert"
-              ? "gespeichert"
-              : zustand === "offline"
-                ? "offline, lokal gesichert"
-                : zustand === "fehler"
-                  ? "nicht gespeichert"
-                  : "geladen"}
+          <span
+            className={`punkt ${
+              anzeige.zustand === "gespeichert" || anzeige.zustand === "lokal" || anzeige.zustand === "geladen"
+                ? "ok"
+                : anzeige.zustand === "fehler-lokal" || anzeige.zustand === "fehler-cloud"
+                  ? "warn"
+                  : "aus"
+            }`}
+          />
+          {speicherId === "onedrive" ? "OneDrive" : "Nur dieses Gerät"} · {zustandText(anzeige.zustand)}
+          {anzeige.wiederholbar && (
+            <button type="button" className="zweit" style={{ padding: "2px 8px", fontSize: 12 }} onClick={() => void werk.jetztSpeichern()}>
+              Erneut versuchen
+            </button>
+          )}
         </div>
+        {anzeige.meldung && (
+          <div className={`hinweis ${anzeige.zustand === "fehler-lokal" ? "dringend" : anzeige.zustand === "fehler-cloud" ? "dringend" : "info"}`}>
+            {anzeige.meldung}
+          </div>
+        )}
       </header>
 
       {meldung && (
-        <div className={`hinweis ${zustand === "fehler" ? "dringend" : "info"}`}>
+        <div className="hinweis info">
           {meldung}
           <button type="button" className="zweit" style={{ marginLeft: 8 }} onClick={() => setMeldung("")}>
             OK
@@ -370,7 +435,7 @@ export default function App() {
         />
       ) : ansicht === "assistenz" ? (
         <>
-          <Schnellerfassung db={db} projektVorschlag={projektVorschlag} onAnlegen={anlegen} />
+          <Schnellerfassung db={db} projektVorschlag={projektVorschlag} onAnlegen={anlegen} onPersonAnlegen={personAnlegen} />
           <div className="karte">
             <h2 style={{ fontSize: 16, marginTop: 0 }}>Als Nächstes</h2>
             {assistenz.length === 0 && <div className="leer">Nichts offen.</div>}
@@ -430,11 +495,76 @@ export default function App() {
             const aufgeloest = applyConflictResolutions(konflikte.merged, konflikte.conflicts, entscheidungen);
             setKonflikte(null);
             setDb(aufgeloest);
-            await repo.force(aufgeloest);
-            setZustand("gespeichert");
+            await werk.uebernehmeEntscheidung(aufgeloest);
           }}
           onAbbrechen={() => setKonflikte(null)}
         />
+      )}
+
+      {entscheidung && (
+        <dialog open>
+          <h2>Ungesicherte Änderungen</h2>
+          <div className="hinweis warnung">
+            Auf diesem Gerät liegen Änderungen, die nie gespeichert wurden, und in der Ablage steht ein abweichender
+            Stand. Eine gemeinsame Ausgangsfassung fehlt, ein automatischer Abgleich wäre deshalb geraten. Nichts wird
+            überschrieben, bevor du entschieden hast.
+          </div>
+          <table className="regeln">
+            <thead>
+              <tr>
+                <th></th>
+                <th>Dieses Gerät</th>
+                <th>Ablage</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Tickets</td>
+                <td>{entscheidung.lokal.tickets.length}</td>
+                <td>{entscheidung.fern.tickets.length}</td>
+              </tr>
+              <tr>
+                <td>Aufgaben</td>
+                <td>{entscheidung.lokal.tasks.length}</td>
+                <td>{entscheidung.fern.tasks.length}</td>
+              </tr>
+              <tr>
+                <td>Verlaufseinträge</td>
+                <td>{entscheidung.lokal.events.length}</td>
+                <td>{entscheidung.fern.events.length}</td>
+              </tr>
+            </tbody>
+          </table>
+          <div className="knopfreihe">
+            <button
+              type="button"
+              className="haupt"
+              onClick={() => {
+                const lokal = entscheidung.lokal;
+                setEntscheidung(null);
+                setDb(lokal);
+                void werk.uebernehmeEntscheidung(lokal);
+              }}
+            >
+              Änderungen dieses Geräts übernehmen
+            </button>
+            <button
+              type="button"
+              className="zweit"
+              onClick={() => {
+                const fern = entscheidung.fern;
+                setEntscheidung(null);
+                setDb(fern);
+                void werk.uebernehmeEntscheidung(fern);
+              }}
+            >
+              Gespeicherten Stand laden
+            </button>
+          </div>
+          <div className="status-zeile" style={{ marginTop: 8 }}>
+            Vor dem Verwerfen empfiehlt sich ein JSON-Export unter Einstellungen.
+          </div>
+        </dialog>
       )}
 
       {importVorschau && (

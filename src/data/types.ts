@@ -220,4 +220,13 @@ export const SHEET_NAMES: Record<CollectionKey, string> = {
 };
 
 export const SELF_PERSON_ID = "PERSON_CLS";
-export const APP_VERSION = "V01-00";
+
+// Versionsstand der laufenden App. Wird im Kopf der App und in den
+// Einstellungen angezeigt (Clemens' Vorgabe vom 19.09.2026: eine
+// Versionsnummer muss ueberall sichtbar sein, nicht nur in Dateinamen).
+// Steigt bei jeder inhaltlichen Aenderung an der laufenden App - nicht bei
+// Tippfehlerkorrekturen, und nicht schon dann, wenn nur ein Baustein in
+// src/bausteine/ liegt, aber noch nicht eingebaut ist.
+//   V01-01  Stand nach Arbeitspunkt 2 (sicheres Speichern)
+//   V01-02  + Arbeitspunkt Schritt 1a: freie Namenseingabe in Personenfeldern
+export const APP_VERSION = "V01-02";

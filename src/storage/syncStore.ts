@@ -21,11 +21,15 @@ function read(key: string): Database | null {
   }
 }
 
-function write(key: string, data: Database) {
+/** Gibt zurueck, ob das Schreiben gelungen ist. Ein stiller Fehlschlag waere
+ *  hier gefaehrlich: die App wuerde "lokal gesichert" anzeigen, obwohl nichts
+ *  gesichert ist (voller Speicher, privates Fenster, blockierte Site-Daten). */
+function write(key: string, data: Database): boolean {
   try {
     localStorage.setItem(PREFIX + key, JSON.stringify(data));
+    return true;
   } catch {
-    // Speicher voll o.ae. - der Offline-Cache ist ein Komfortfeature, kein Muss
+    return false;
   }
 }
 
@@ -40,14 +44,14 @@ function clear(key: string) {
 export function readBaseline(file: string): Database | null {
   return read(`baseline_${file}`);
 }
-export function writeBaseline(file: string, data: Database) {
-  write(`baseline_${file}`, data);
+export function writeBaseline(file: string, data: Database): boolean {
+  return write(`baseline_${file}`, data);
 }
 export function readPending(file: string): Database | null {
   return read(`pending_${file}`);
 }
-export function writePending(file: string, data: Database) {
-  write(`pending_${file}`, data);
+export function writePending(file: string, data: Database): boolean {
+  return write(`pending_${file}`, data);
 }
 export function clearPending(file: string) {
   clear(`pending_${file}`);

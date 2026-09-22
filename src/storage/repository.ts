@@ -11,6 +11,7 @@ import { diffAndMerge, type FieldConflict } from "./sync";
 import * as onedrive from "./onedrive";
 import { getAccount, initMsal, login, logout } from "./auth";
 import { istVerbindungsfehler, readBaseline, writeBaseline } from "./syncStore";
+import { DATA_FILE } from "./onedrive";
 
 export type SaveOutcome =
   | { status: "gespeichert"; db: Database }
@@ -52,7 +53,9 @@ export class LocalRepository implements Repository {
   async load(): Promise<Database | null> {
     try {
       const raw = localStorage.getItem(LOCAL_KEY);
-      return raw ? (JSON.parse(raw) as Database) : null;
+      const stand = raw ? (JSON.parse(raw) as Database) : null;
+      if (stand) writeBaseline(DATA_FILE, stand);
+      return stand;
     } catch {
       return null;
     }
@@ -66,6 +69,9 @@ export class LocalRepository implements Repository {
   async force(db: Database): Promise<void> {
     try {
       localStorage.setItem(LOCAL_KEY, JSON.stringify(db));
+      // Auch lokal eine Ausgangsfassung fuehren: ohne sie kann ein spaeterer
+      // Abgleich ungesicherte Aenderungen nicht zusammenfuehren.
+      writeBaseline(DATA_FILE, db);
     } catch (error) {
       throw new Error(`Lokaler Speicher nicht verfügbar: ${String(error)}`);
     }

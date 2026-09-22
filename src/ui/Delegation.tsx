@@ -7,8 +7,9 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Feld } from "./Teile";
+import { Personenfeld } from "./Personenfeld";
 import { buildMailText } from "../data/mailtext";
-import { valueLabel, valuesOfGroup } from "../data/db";
+import { valueLabel } from "../data/db";
 import { formatDate } from "../data/dates";
 import { SELF_PERSON_ID, type Database, type EntityType, type WorkItem } from "../data/types";
 
@@ -19,6 +20,7 @@ export function Delegationsdialog({
   ticketTitle,
   onBestaetigen,
   onSchliessen,
+  onPersonAnlegen,
 }: {
   db: Database;
   type: EntityType;
@@ -26,6 +28,7 @@ export function Delegationsdialog({
   ticketTitle?: string;
   onBestaetigen: (empfaengerId: string, text: string) => void;
   onSchliessen: () => void;
+  onPersonAnlegen: (label: string) => string;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [kopiert, setKopiert] = useState(false);
@@ -71,16 +74,13 @@ export function Delegationsdialog({
       <hr style={{ border: "none", borderTop: "1px solid var(--line)", margin: "14px 0" }} />
 
       <Feld label="Tatsächlich übergeben an">
-        <select value={empfaenger} onChange={(event) => setEmpfaenger(event.target.value)}>
-          <option value="">– bitte wählen –</option>
-          {valuesOfGroup(db, "Person")
-            .filter((person) => person.id !== SELF_PERSON_ID)
-            .map((person) => (
-              <option key={person.id} value={person.id}>
-                {person.label}
-              </option>
-            ))}
-        </select>
+        <Personenfeld
+          db={db}
+          wert={empfaenger || null}
+          onChange={(id) => setEmpfaenger(id ?? "")}
+          aktionen={{ anlegen: onPersonAnlegen }}
+          listenId={`personen-delegation-${item.id}`}
+        />
       </Feld>
       <div className="status-zeile" style={{ marginTop: 6 }}>
         {item.dueDate

@@ -7,6 +7,7 @@
 
 import { useState } from "react";
 import { Feld, Mehrfachauswahl } from "./Teile";
+import { Personenfeld, Personenmehrfachfeld } from "./Personenfeld";
 import { valuesOfGroup } from "../data/db";
 import type { Database, ID, Priority } from "../data/types";
 import { SELF_PERSON_ID } from "../data/types";
@@ -26,10 +27,13 @@ export function Schnellerfassung({
   db,
   projektVorschlag,
   onAnlegen,
+  onPersonAnlegen,
 }: {
   db: Database;
   projektVorschlag: ID[];
   onAnlegen: (eingabe: NeuesTicket) => void;
+  /** Legt eine neue Person an und liefert deren ID sofort zurueck. */
+  onPersonAnlegen: (label: string) => ID;
 }) {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -41,7 +45,6 @@ export function Schnellerfassung({
   const [abstimmungMit, setAbstimmungMit] = useState<ID[]>([]);
   const [offen, setOffen] = useState(false);
 
-  const personen = valuesOfGroup(db, "Person");
   const projektOptionen = valuesOfGroup(db, "Projekt").map((v) => ({ id: v.id, label: v.label }));
   const vorschlagAktiv = projektVorschlag.length > 0 && projektVorschlag.every((id) => projekte.includes(id));
 
@@ -90,13 +93,14 @@ export function Schnellerfassung({
         <summary>Weitere Angaben</summary>
         <div className="feldgitter" style={{ marginTop: 8 }}>
           <Feld label="Lead">
-            <select value={leadId} onChange={(event) => setLeadId(event.target.value)}>
-              {personen.map((person) => (
-                <option key={person.id} value={person.id}>
-                  {person.label}
-                </option>
-              ))}
-            </select>
+            <Personenfeld
+              db={db}
+              wert={leadId}
+              onChange={(id) => setLeadId(id ?? SELF_PERSON_ID)}
+              aktionen={{ anlegen: onPersonAnlegen }}
+              listenId="personen-erfassung-lead"
+              pflicht
+            />
           </Feld>
           <Feld label="Solltermin">
             <input type="date" value={dueDate} onChange={(event) => setDueDate(event.target.value)} />
@@ -119,10 +123,12 @@ export function Schnellerfassung({
         </div>
         <div style={{ marginTop: 8 }}>
           <Feld label="Abstimmung mit">
-            <Mehrfachauswahl
-              optionen={personen.filter((p) => p.id !== SELF_PERSON_ID).map((p) => ({ id: p.id, label: p.label }))}
-              gewaehlt={abstimmungMit}
+            <Personenmehrfachfeld
+              db={db}
+              werte={abstimmungMit}
               onChange={setAbstimmungMit}
+              aktionen={{ anlegen: onPersonAnlegen }}
+              listenId="personen-erfassung-abstimmung"
             />
           </Feld>
         </div>

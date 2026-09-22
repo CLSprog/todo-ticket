@@ -58,6 +58,7 @@ header.kopf {
   border-bottom: 1px solid var(--line);
 }
 .kopf h1 { font-size: 18px; margin: 0 0 8px; font-weight: 700; }
+.kopf h1 .fassung { font-size: 12px; font-weight: 400; color: var(--muted); vertical-align: middle; }
 .kopf .zeile { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 
 nav.reiter { display: flex; gap: 4px; flex: 1; }

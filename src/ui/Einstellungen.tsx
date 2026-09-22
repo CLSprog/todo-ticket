@@ -7,7 +7,7 @@
 import { useState } from "react";
 import { Feld } from "./Teile";
 import { valuesOfGroup } from "../data/db";
-import { VALUE_GROUPS, type Database, type Rule, type ValueItem } from "../data/types";
+import { APP_VERSION, VALUE_GROUPS, type Database, type Rule, type ValueItem } from "../data/types";
 
 export function Einstellungen({
   db,
@@ -207,9 +207,17 @@ export function Einstellungen({
       <div className="karte">
         <h2 style={{ fontSize: 16, marginTop: 0 }}>Über</h2>
         <div className="status-zeile">
-          App {String(db.meta.appVersion)} · Konzept {String(db.meta.conceptVersion)} · Schema{" "}
-          {String(db.meta.schemaVersion)} · Datenrevision {String(db.meta.dataRevision)}
+          Laufende App-Fassung: <b>{APP_VERSION}</b>
         </div>
+        <div className="status-zeile" style={{ marginTop: 4 }}>
+          Konzept {String(db.meta.conceptVersion)} · Schema {String(db.meta.schemaVersion)} ·
+          Datenrevision {String(db.meta.dataRevision)}
+        </div>
+        {db.meta.appVersion !== APP_VERSION && (
+          <div className="status-zeile" style={{ marginTop: 4 }}>
+            Diese Datei wurde ursprünglich mit App-Fassung {String(db.meta.appVersion)} angelegt.
+          </div>
+        )}
       </div>
     </div>
   );
