@@ -13,9 +13,13 @@ import { PublicClientApplication, type AccountInfo, InteractionRequiredAuthError
 
 // Azure-App-Registrierung "P08 ToDo-Liste_Ticket" (eigene App, nicht die von P03).
 const CLIENT_ID = "5dae8075-fc79-48e8-8f9b-0c66029e146f";
-// "common" erlaubt private Microsoft-Konten und Organisationskonten. Der
-// Datenbestand liegt bewusst im privaten Konto, nicht im Bauwert-Konto.
-const TENANT_AUTHORITY = "https://login.microsoftonline.com/common";
+// Die Azure-App-Registrierung "P08 ToDo-Liste_Ticket" ist auf "nur private
+// Microsoft-Konten" eingestellt (userAudience = Consumers). Dafuer ist
+// "/consumers" der richtige Endpunkt - "/common" (fuer private UND
+// Organisationskonten gemeinsam) scheitert bei so einer Registrierung mit
+// AADSTS-Fehler "invalid_request: userAudience". Der Datenbestand liegt
+// ohnehin bewusst im privaten Konto, nicht im Bauwert-Konto.
+const TENANT_AUTHORITY = "https://login.microsoftonline.com/consumers";
 
 const REDIRECT_URI = `${window.location.origin}${import.meta.env.BASE_URL}`;
 
