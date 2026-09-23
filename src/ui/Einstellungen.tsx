@@ -7,6 +7,7 @@
 import { useState } from "react";
 import { Feld } from "./Teile";
 import { valuesOfGroup } from "../data/db";
+import type { Pruefergebnis } from "../bausteine/B04-C01_Cloud-Speicher_V02-00";
 import { APP_VERSION, VALUE_GROUPS, type Database, type Rule, type ValueItem } from "../data/types";
 
 export function Einstellungen({
@@ -16,6 +17,7 @@ export function Einstellungen({
   onSpeicherWechsel,
   onAnmelden,
   onAbmelden,
+  onSpeicherpruefung,
   onRegelAendern,
   onWertAnlegen,
   onWertAendern,
@@ -29,6 +31,11 @@ export function Einstellungen({
   onSpeicherWechsel: (id: string) => void;
   onAnmelden: () => void;
   onAbmelden: () => void;
+  /** Nur vorhanden, wenn eine Pruefung gerade sinnvoll ist (OneDrive, angemeldet).
+   *  Fuehrt B04-C01s speicherpruefung() gegen die echte Ablage aus - der von
+   *  hier aus nicht ersetzbare Nachweis fuer Riegel 1/2 (siehe
+   *  P08_Graph-Befund-bedingtes-Schreiben). */
+  onSpeicherpruefung?: () => Promise<Pruefergebnis>;
   onRegelAendern: (rule: Rule) => void;
   onWertAnlegen: (gruppe: string, label: string) => void;
   onWertAendern: (wert: ValueItem) => void;
@@ -38,6 +45,8 @@ export function Einstellungen({
 }) {
   const [gruppe, setGruppe] = useState<string>("Person");
   const [neuerWert, setNeuerWert] = useState("");
+  const [pruefLaeuft, setPruefLaeuft] = useState(false);
+  const [pruefErgebnis, setPruefErgebnis] = useState<Pruefergebnis | null>(null);
 
   return (
     <div>
@@ -65,6 +74,35 @@ export function Einstellungen({
         <div className="status-zeile" style={{ marginTop: 8 }}>
           OneDrive-Ablage: _KI/ThinkTank/P08_ToDo-Liste/07_Database
         </div>
+        {onSpeicherpruefung && (
+          <div style={{ marginTop: 10 }}>
+            <button
+              type="button"
+              className="zweit"
+              disabled={pruefLaeuft}
+              onClick={() => {
+                setPruefLaeuft(true);
+                setPruefErgebnis(null);
+                onSpeicherpruefung()
+                  .then(setPruefErgebnis)
+                  .finally(() => setPruefLaeuft(false));
+              }}
+            >
+              {pruefLaeuft ? "Prüfung läuft …" : "Speicher prüfen (Riegel 1/2)"}
+            </button>
+            {pruefErgebnis && (
+              <div
+                className="status-zeile"
+                style={{ marginTop: 8, fontFamily: "monospace", fontSize: 12, whiteSpace: "pre-wrap" }}
+              >
+                {pruefErgebnis.zeilen.join("\n")}
+                {"\n"}
+                Riegel 1: {pruefErgebnis.riegel1Wirkt ? "wirkt" : "wirkt NICHT"} · Riegel 2:{" "}
+                {pruefErgebnis.riegel2Wirkt === "nichtPruefbar" ? "nicht prüfbar" : pruefErgebnis.riegel2Wirkt ? "wirkt" : "wirkt nicht"}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="karte">

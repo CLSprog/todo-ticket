@@ -190,6 +190,9 @@ export interface Database {
   suggestions: Suggestion[];
   values: ValueItem[];
   rules: Rule[];
+  // Index-Signatur, damit die generischen Bausteine (B04-C04/C09, Datenbestand
+  // = Record<string, unknown>) den Datenbestand ohne Umwandlung entgegennehmen.
+  [key: string]: unknown;
 }
 
 /** Sammlungen, die zeilenweise abgeglichen werden. meta bleibt aussen vor. */
@@ -229,4 +232,8 @@ export const SELF_PERSON_ID = "PERSON_CLS";
 // src/bausteine/ liegt, aber noch nicht eingebaut ist.
 //   V01-01  Stand nach Arbeitspunkt 2 (sicheres Speichern)
 //   V01-02  + Arbeitspunkt Schritt 1a: freie Namenseingabe in Personenfeldern
-export const APP_VERSION = "V01-02";
+//   V01-03  + Pakete A-C (Erfassen/Bearbeiten, Finden/Assistenz, Sichern) und
+//           Bausteine eingebaut (Schritt 7-9): C01/C04/C05/C06/C09 ersetzen
+//           die P08-eigenen Nachbauten; lokal und OneDrive laufen jetzt durch
+//           dasselbe Speicherwerk
+export const APP_VERSION = "V01-03";

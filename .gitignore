@@ -3,3 +3,4 @@ dist
 *.local
 .DS_Store
 tests/.abnahme.mjs
+tests/.speichern.mjs

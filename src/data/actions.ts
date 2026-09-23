@@ -4,7 +4,7 @@
 // schreibt die betroffene Zeile fort (revision, updatedAt) und legt den
 // zugehoerigen Verlaufseintrag an. Der Verlauf wird ergaenzt, nie ueberschrieben.
 
-import { createEvent, createTask, isRuleActive, touch, valueLabel } from "./db";
+import { createEvent, createReference, createTask, isRuleActive, touch, valueLabel } from "./db";
 import { delegationDueDate, needsDelegation } from "./derive";
 import { nowTimestamp, today } from "./dates";
 import { SELF_PERSON_ID, type Database, type EntityType, type ID, type Task, type Ticket, type WorkItem } from "./types";
@@ -264,6 +264,48 @@ export function addNote(db: Database, type: EntityType, id: ID, text: string, pe
   return {
     ...db,
     events: [...db.events, createEvent(type, id, "Notiz", text.trim(), {}, personId)],
+    meta: { ...db.meta, dataRevision: db.meta.dataRevision + 1 },
+  };
+}
+
+/** Nachverfolgung (Paket A): reiner Verlaufseintrag, kein Automatikversand.
+ *  Loest keine erneute Delegation aus - dafuer gibt es "Erneut delegieren". */
+export function recordFollowUp(db: Database, type: EntityType, id: ID, text: string): Database {
+  const current = findItem(db, type, id);
+  if (!current) return db;
+  const event = createEvent(type, id, "Nachfrage", text.trim() || "Nachfrage vermerkt", {}, current.leadId);
+  return {
+    ...db,
+    events: [...db.events, event],
+    meta: { ...db.meta, dataRevision: db.meta.dataRevision + 1 },
+  };
+}
+
+/** Quelle/Verweis anlegen (Paket A). Nur Link/Fundstelle als Text - keine
+ *  Dateiuebernahme, siehe P08_Umsetzungsvorschlag-A-D V01-00. */
+export function addReference(
+  db: Database,
+  type: EntityType,
+  id: ID,
+  label: string,
+  uri: string,
+): Database {
+  if (!label.trim() && !uri.trim()) return db;
+  const reference = createReference(type, id, label, uri);
+  return {
+    ...db,
+    references: [...db.references, reference],
+    meta: { ...db.meta, dataRevision: db.meta.dataRevision + 1 },
+  };
+}
+
+export function removeReference(db: Database, referenceId: ID): Database {
+  const vorhanden = db.references.some((r) => r.id === referenceId);
+  if (!vorhanden) return db;
+  const stamp = nowTimestamp();
+  return {
+    ...db,
+    references: db.references.map((r) => (r.id === referenceId ? { ...r, deletedAt: stamp, updatedAt: stamp } : r)),
     meta: { ...db.meta, dataRevision: db.meta.dataRevision + 1 },
   };
 }

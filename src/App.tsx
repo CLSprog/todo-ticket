@@ -1,15 +1,17 @@
 // P08 ToDo-Ticket - Zusammenfuehrung der Ansichten.
 //
-// Die App kennt den Speicherort nur ueber die Repository-Schnittstelle. Der
-// Synchronisationszustand ist immer sichtbar (Kapitel 16); nicht gespeicherte
-// Aenderungen bleiben im lokalen Arbeitscache, damit offline nichts verloren geht.
+// Schritt 9 (Bausteine einbauen): Speicherort, Zwischenspeicher, Abgleich und
+// Konfliktdialog laufen nicht mehr ueber P08-eigene Nachbauten, sondern ueber
+// die geprueften Bausteine B04-C01/C04/C05/C06/C09. "Lokal" und "OneDrive"
+// sind beides nur Umsetzungen von C01s CloudSpeicher-Vertrag (siehe
+// storage/lokalSpeicher.ts) und laufen dadurch durch DASSELBE Speicherwerk -
+// nicht mehr zwei getrennte Ablaeufe.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Schnellerfassung, type NeuesTicket } from "./ui/Schnellerfassung";
 import { Filterleiste } from "./ui/Filterleiste";
 import { Ticketdetail, type DetailAktionen } from "./ui/Ticketdetail";
 import { Einstellungen } from "./ui/Einstellungen";
-import { Konfliktdialog } from "./ui/Konfliktdialog";
 import { Hinweise, Marke } from "./ui/Teile";
 
 import {
@@ -22,17 +24,40 @@ import {
   newId,
   valueLabel,
 } from "./data/db";
-import { addNote, completeItem, completeWithFollowUp, confirmDelegation, redelegate, reopenItem, softDelete, updateItem } from "./data/actions";
+import {
+  addNote,
+  addReference,
+  completeItem,
+  completeWithFollowUp,
+  confirmDelegation,
+  recordFollowUp,
+  redelegate,
+  removeReference,
+  reopenItem,
+  softDelete,
+  updateItem,
+} from "./data/actions";
 import { assistanceItems, delegationDueDate, hintsFor } from "./data/derive";
-import { LEERER_FILTER, suche, type FilterState } from "./data/filter";
+import { kontextAktiv, LEERER_FILTER, passtKontext, suche, type FilterState } from "./data/filter";
+import {
+  ermittleVorschlaege,
+  vorschlagBestaetigen,
+  vorschlagVerwerfen,
+  vorschlaegeAktualisieren,
+} from "./data/suggestions";
 import { createEmptyDatabase } from "./data/db";
 import { formatDate, nowTimestamp, today } from "./data/dates";
 import { dateStamp, downloadBlob } from "./bausteine/B04-C07_Datei-Download";
-import { makeRepository, type Repository } from "./storage/repository";
-import { applyConflictResolutions, type FieldConflict } from "./storage/sync";
-import { clearPending, readBaseline, readPending, writePending } from "./storage/syncStore";
-import { Speicherwerk, zustandText, type Anzeige, type Zwischenspeicher } from "./storage/speicherwerk";
-import { DATA_FILE } from "./storage/onedrive";
+import { erzeugeGraphSpeicher, speicherpruefung, type CloudSpeicher } from "./bausteine/B04-C01_Cloud-Speicher_V02-00";
+import { erzeugeLokalSpeicher } from "./storage/lokalSpeicher";
+import { erzeugeZwischenspeicher } from "./bausteine/B04-C05_Offline-Warteschlange_V01-01";
+import { Speicherwerk, zustandText, applyConflictResolutions, type Anzeige } from "./bausteine/B04-C09_Speicherwerk_V01-01";
+import type { FeldKonflikt, ZeilenKonflikt } from "./bausteine/B04-C04_Drei-Wege-Abgleich_V02-00";
+import Konfliktdialog from "./bausteine/B04-C06_Konfliktdialog_V01-01";
+import { ABGLEICH_OPTIONEN, erzeugeFormatierer } from "./storage/abgleich";
+import { taeglicheSicherung, sicherungsDateiname, type SicherungsZiel } from "./storage/sicherung";
+import { DATA_FILE, DATA_FOLDER } from "./storage/onedrive";
+import { getAccessToken, getAccount, initMsal, login, logout } from "./storage/auth";
 import {
   APP_VERSION,
   SELF_PERSON_ID,
@@ -50,75 +75,120 @@ import {
 type Ansicht = "assistenz" | "liste" | "einstellungen";
 
 const SPEICHER_SCHLUESSEL = "p08_speicher";
-// Zwischenspeicher und Baseline muessen denselben Schluessel benutzen, sonst
-// findet der Abgleich beim Laden nie eine gemeinsame Ausgangsfassung.
-const CACHE_DATEI = DATA_FILE;
 
 export default function App() {
-  const [db, setDb] = useState<Database>(() => readPending(CACHE_DATEI) ?? createEmptyDatabase());
   const [ansicht, setAnsicht] = useState<Ansicht>("assistenz");
   const [filter, setFilter] = useState<FilterState>(LEERER_FILTER);
   const [offenesTicket, setOffenesTicket] = useState<ID | null>(null);
   const [speicherId, setSpeicherId] = useState<string>(() => localStorage.getItem(SPEICHER_SCHLUESSEL) ?? "local");
+  const [angemeldet, setAngemeldet] = useState(false);
   const [anzeige, setAnzeige] = useState<Anzeige>({ zustand: "geladen", meldung: "", wiederholbar: false });
   const [meldung, setMeldung] = useState<string>("");
   const [entscheidung, setEntscheidung] = useState<{ lokal: Database; fern: Database } | null>(null);
-  const [konflikte, setKonflikte] = useState<{ merged: Database; conflicts: FieldConflict[] } | null>(null);
-  const [angemeldet, setAngemeldet] = useState(false);
+  const [konflikte, setKonflikte] = useState<{
+    merged: Database;
+    konflikte: FeldKonflikt[];
+    zeilenKonflikte: ZeilenKonflikt[];
+  } | null>(null);
   const [importVorschau, setImportVorschau] = useState<{ db: Database; meldungen: string[] } | null>(null);
 
-  const repo = useMemo<Repository>(() => makeRepository(speicherId), [speicherId]);
+  // Beide Speicherorte sind Umsetzungen desselben C01-Vertrags - siehe Kopf
+  // dieser Datei. Direkt nach dem Anmelden/Abmelden aendert sich `angemeldet`
+  // und damit auch die `kennung` des Graph-Speichers (Konto geht in sie ein);
+  // ein kurzes Fenster vor initMsal() mit kennung "graph:unbekannt" ist
+  // gewollt hingenommen - es fuehrt hoechstens zu einem zusaetzlichen,
+  // harmlosen Neuladen (siehe Lade-Effekt unten).
+  const cloudSpeicher = useMemo<CloudSpeicher>(() => {
+    if (speicherId === "onedrive") {
+      return erzeugeGraphSpeicher({
+        tokenHolen: getAccessToken,
+        standardOrdner: DATA_FOLDER,
+        kontoKennung: getAccount()?.homeAccountId ?? getAccount()?.username ?? undefined,
+      });
+    }
+    return erzeugeLokalSpeicher();
+  }, [speicherId, angemeldet]);
+
+  const cache = useMemo(
+    () =>
+      erzeugeZwischenspeicher<Database>({
+        vorsatz: "p08_",
+        raum: cloudSpeicher.kennung,
+        beiFehler: (vorgang, schluessel, fehler) =>
+          console.warn(`Zwischenspeicher ${vorgang} fehlgeschlagen (${schluessel}): ${String(fehler)}`),
+      }),
+    [cloudSpeicher],
+  );
+
+  const [db, setDb] = useState<Database>(() => cache.ausstehendLesen(DATA_FILE) ?? createEmptyDatabase());
+
+  // Das Speicherwerk (C09) haelt die Reihenfolge ein: hoechstens ein laufender
+  // Vorgang, Bestaetigung nur fuer den tatsaechlich geschriebenen Stand,
+  // Abgleich (C04) und Konfliktvorlage bei widerspruechlichen Aenderungen.
+  const werk = useMemo(
+    () =>
+      new Speicherwerk<Database>(
+        cloudSpeicher,
+        cache,
+        setAnzeige,
+        (zusammengefuehrt) => setDb(zusammengefuehrt),
+        (merged, konflikteListe, zeilenKonflikteListe) =>
+          setKonflikte({ merged, konflikte: konflikteListe, zeilenKonflikte: zeilenKonflikteListe }),
+        {
+          datei: DATA_FILE,
+          ordner: DATA_FOLDER,
+          ...ABGLEICH_OPTIONEN,
+          bereit: () => speicherId !== "onedrive" || angemeldet,
+        },
+      ),
+    [cloudSpeicher, cache, speicherId, angemeldet],
+  );
+
+  const sicherungsZiel = useMemo<SicherungsZiel>(
+    () => ({
+      listFiles: (folder) => cloudSpeicher.auflisten(folder),
+      saveBackup: async (state, stamp) => {
+        const ordner = `${DATA_FOLDER}/Sicherung`;
+        await cloudSpeicher.ordnerSicherstellen(ordner);
+        await cloudSpeicher.schreiben(state, sicherungsDateiname(stamp), ordner);
+      },
+    }),
+    [cloudSpeicher],
+  );
+
   const bereit = useRef(false);
   /** Namen, die in diesem Zug angelegt wurden, bevor der Zustand nachgezogen hat. */
   const frischAngelegt = useRef(new Map<string, ID>());
 
-  const cache = useMemo<Zwischenspeicher>(
-    () => ({
-      schreibe: (stand: Database) => writePending(CACHE_DATEI, stand),
-      lies: () => readPending(CACHE_DATEI),
-      leere: () => clearPending(CACHE_DATEI),
-      basis: () => readBaseline(CACHE_DATEI),
-    }),
-    [],
-  );
-
-  // Das Speicherwerk haelt die Reihenfolge ein: hoechstens ein laufender
-  // Vorgang, Bestaetigung nur fuer den tatsaechlich geschriebenen Stand.
-  const werk = useMemo(
-    () =>
-      new Speicherwerk(
-        repo,
-        cache,
-        setAnzeige,
-        (zusammengefuehrt) => setDb(zusammengefuehrt),
-        (merged, conflicts) => setKonflikte({ merged, conflicts }),
-      ),
-    [repo, cache],
-  );
-
-  // Beim Start bzw. Speicherwechsel laden - und dabei ungesicherte lokale
-  // Aenderungen beruecksichtigen statt sie zu ueberschreiben.
+  // Beim Start, Speicherwechsel oder Anmeldungswechsel laden - und dabei
+  // ungesicherte lokale Aenderungen beruecksichtigen statt sie zu ueberschreiben.
   useEffect(() => {
     let abgebrochen = false;
     bereit.current = false;
     (async () => {
       try {
-        await repo.init();
-        if (abgebrochen) return;
-        setAngemeldet(repo.isSignedIn());
-        if (repo.needsSignIn() && !repo.isSignedIn()) {
-          setMeldung("Nicht angemeldet – Änderungen werden lokal gesichert und später übertragen.");
-          setAnzeige({ zustand: "ausstehend", meldung: "", wiederholbar: false });
-          bereit.current = true;
-          return;
+        if (speicherId === "onedrive") {
+          await initMsal();
+          if (abgebrochen) return;
+          const angemeldetJetzt = getAccount() !== null;
+          setAngemeldet(angemeldetJetzt);
+          if (!angemeldetJetzt) {
+            setMeldung("Nicht angemeldet – Änderungen werden lokal gesichert und später übertragen.");
+            setAnzeige({ zustand: "ausstehend", meldung: "", wiederholbar: false });
+            bereit.current = true;
+            return;
+          }
+        } else {
+          setAngemeldet(true);
         }
+
         const ergebnis = await werk.laden();
         if (abgebrochen) return;
         if (ergebnis.art === "stand") {
           if (ergebnis.db) setDb(ergebnis.db);
           setMeldung("");
         } else if (ergebnis.art === "konflikt") {
-          setKonflikte({ merged: ergebnis.merged, conflicts: ergebnis.conflicts });
+          setKonflikte({ merged: ergebnis.merged, konflikte: ergebnis.konflikte, zeilenKonflikte: ergebnis.zeilenKonflikte });
         } else if (ergebnis.art === "entscheidung") {
           setEntscheidung({ lokal: ergebnis.lokal, fern: ergebnis.fern });
         } else {
@@ -133,7 +203,7 @@ export default function App() {
     return () => {
       abgebrochen = true;
     };
-  }, [repo, werk]);
+  }, [werk]);
 
   // Jede uebernommene Aenderung geht sofort in den lokalen Zwischenspeicher
   // und von dort geordnet in die Ablage.
@@ -141,6 +211,15 @@ export default function App() {
     if (!bereit.current) return;
     werk.aendern(db);
   }, [db, werk]);
+
+  // Taegliche Sicherung (Kapitel 17): einmal pro Tag, beim ersten erfolgreichen
+  // Speichern. Ein Fehler hier darf den eigentlichen Speichervorgang nicht
+  // stoeren - taeglicheSicherung() faengt das selbst ab.
+  useEffect(() => {
+    if (anzeige.zustand !== "gespeichert") return;
+    if (speicherId !== "onedrive" || !angemeldet) return;
+    void taeglicheSicherung(sicherungsZiel, DATA_FOLDER, db);
+  }, [anzeige.zustand, speicherId, angemeldet, db, sicherungsZiel]);
 
   // ---------------------------------------------------------------- Aktionen
 
@@ -165,11 +244,19 @@ export default function App() {
       ...eingabe.projekte.map((id) => createAssignment("Ticket", ticket.id, "Projekt", id)),
       ...eingabe.abstimmungMit.map((id) => createAssignment("Ticket", ticket.id, "Abstimmung mit", id)),
     ];
+    // K01: Vorschlaege gegen den Stand samt der eben gewaehlten Zuordnungen
+    // ermitteln, damit schon Zugeordnetes nicht gleich nochmal vorgeschlagen wird.
+    const vorschlaege = ermittleVorschlaege(
+      { ...db, assignments: [...db.assignments, ...zuordnungen] },
+      "Ticket",
+      mitFrist,
+    );
 
     setDb((stand) => ({
       ...stand,
       tickets: [...stand.tickets, mitFrist],
       assignments: [...stand.assignments, ...zuordnungen],
+      suggestions: [...stand.suggestions, ...vorschlaege],
       events: [...stand.events, createEvent("Ticket", ticket.id, "Erfassung", "Ticket erfasst")],
       meta: { ...stand.meta, dataRevision: stand.meta.dataRevision + 1 },
     }));
@@ -207,13 +294,21 @@ export default function App() {
         }
         return ergebnisse.db;
       }),
-    wiederOeffnen: (type, id) => setDb((stand) => reopenItem(stand, type, id)),
+    wiederOeffnen: (type, id, grund) => setDb((stand) => reopenItem(stand, type, id, grund)),
+    nachfrage: (type, id, text) => setDb((stand) => recordFollowUp(stand, type, id, text)),
+    referenzAnlegen: (type, id, label, uri) => setDb((stand) => addReference(stand, type, id, label, uri)),
+    referenzEntfernen: (referenceId) => setDb((stand) => removeReference(stand, referenceId)),
+    vorschlagBestaetigen: (suggestionId) => setDb((stand) => vorschlagBestaetigen(stand, suggestionId)),
+    vorschlagVerwerfen: (suggestionId) => setDb((stand) => vorschlagVerwerfen(stand, suggestionId)),
+    vorschlaegeAktualisieren: (type, id) => setDb((stand) => vorschlaegeAktualisieren(stand, type, id)),
     aufgabeAnlegen: (ticketId, titel) =>
       setDb((stand) => {
         const task = createTask(ticketId, titel);
+        const vorschlaege = ermittleVorschlaege(stand, "Aufgabe", task, ticketId);
         return {
           ...stand,
           tasks: [...stand.tasks, task],
+          suggestions: [...stand.suggestions, ...vorschlaege],
           events: [...stand.events, createEvent("Aufgabe", task.id, "Erfassung", "Aufgabe erfasst")],
           meta: { ...stand.meta, dataRevision: stand.meta.dataRevision + 1 },
         };
@@ -311,10 +406,19 @@ export default function App() {
 
   const ticket = offenesTicket ? db.tickets.find((t) => t.id === offenesTicket) : undefined;
   const treffer = useMemo(() => suche(db, filter), [db, filter]);
-  const assistenz = useMemo(
-    () => assistanceItems(db, activeTickets(db), activeTasks(db)).slice(0, 30),
-    [db],
-  );
+  // K02 + Paket B: global gereiht, bei gewaehlter Situation (Reiter "Suchen")
+  // zusaetzlich auf diese Situation eingegrenzt - Rangfolge bleibt unveraendert.
+  const assistenzAlle = useMemo(() => assistanceItems(db, activeTickets(db), activeTasks(db)), [db]);
+  const kontextGesetzt = kontextAktiv(filter);
+  const assistenz = useMemo(() => {
+    if (!kontextGesetzt) return assistenzAlle.slice(0, 30);
+    return assistenzAlle
+      .filter(({ item }) => {
+        const alsAufgabe = db.tasks.find((t) => t.id === item.id);
+        return passtKontext(db, item, alsAufgabe?.ticketId, filter);
+      })
+      .slice(0, 30);
+  }, [assistenzAlle, kontextGesetzt, filter, db]);
   const projektVorschlag = filter.projekte;
 
   function titelVon(item: WorkItem): { titel: string; zusatz: string; ticketId: ID } {
@@ -351,7 +455,7 @@ export default function App() {
         <div className="status-zeile" style={{ marginTop: 6 }}>
           <span
             className={`punkt ${
-              anzeige.zustand === "gespeichert" || anzeige.zustand === "lokal" || anzeige.zustand === "geladen"
+              anzeige.zustand === "gespeichert" || anzeige.zustand === "geladen"
                 ? "ok"
                 : anzeige.zustand === "fehler-lokal" || anzeige.zustand === "fehler-cloud"
                   ? "warn"
@@ -394,19 +498,19 @@ export default function App() {
           }}
           onAnmelden={async () => {
             try {
-              await repo.signIn();
+              await initMsal();
+              await login();
               setAngemeldet(true);
-              const geladen = await repo.load();
-              if (geladen) setDb(geladen);
               setMeldung("");
             } catch (error) {
               setMeldung(`Anmeldung fehlgeschlagen: ${String(error)}`);
             }
           }}
           onAbmelden={async () => {
-            await repo.signOut();
+            await logout();
             setAngemeldet(false);
           }}
+          onSpeicherpruefung={speicherId === "onedrive" && angemeldet ? () => speicherpruefung(cloudSpeicher, DATA_FOLDER) : undefined}
           onRegelAendern={(rule: Rule) =>
             setDb((stand) => ({ ...stand, rules: stand.rules.map((r) => (r.id === rule.id ? rule : r)) }))
           }
@@ -438,6 +542,11 @@ export default function App() {
           <Schnellerfassung db={db} projektVorschlag={projektVorschlag} onAnlegen={anlegen} onPersonAnlegen={personAnlegen} />
           <div className="karte">
             <h2 style={{ fontSize: 16, marginTop: 0 }}>Als Nächstes</h2>
+            {kontextGesetzt && (
+              <div className="status-zeile" style={{ marginBottom: 8 }}>
+                Nach der unter „Suchen“ gewählten Situation gefiltert.
+              </div>
+            )}
             {assistenz.length === 0 && <div className="leer">Nichts offen.</div>}
             {assistenz.map(({ item, hints, reason }) => {
               const { titel, zusatz, ticketId } = titelVon(item);
@@ -490,14 +599,18 @@ export default function App() {
 
       {konflikte && (
         <Konfliktdialog
-          conflicts={konflikte.conflicts}
-          onEntscheiden={async (entscheidungen) => {
-            const aufgeloest = applyConflictResolutions(konflikte.merged, konflikte.conflicts, entscheidungen);
+          konflikte={konflikte.konflikte}
+          zeilenKonflikte={konflikte.zeilenKonflikte}
+          formatiere={erzeugeFormatierer(konflikte.merged)}
+          beiEntscheidung={async (wahl) => {
+            const aufgeloest = applyConflictResolutions(
+              { zusammengefuehrt: konflikte.merged, konflikte: konflikte.konflikte, zeilenKonflikte: konflikte.zeilenKonflikte, uebernommen: [] },
+              wahl,
+            );
             setKonflikte(null);
             setDb(aufgeloest);
             await werk.uebernehmeEntscheidung(aufgeloest);
           }}
-          onAbbrechen={() => setKonflikte(null)}
         />
       )}
 
@@ -586,7 +699,16 @@ export default function App() {
               type="button"
               className="haupt"
               onClick={() => {
-                exportJson(); // Sicherung des bisherigen Stands vor dem Ersetzen
+                exportJson(); // Lokale Sicherung des bisherigen Stands vor dem Ersetzen
+                // Zusaetzlich in die aktuelle Ablage wegsichern, ueber denselben
+                // Sicherungsmechanismus wie die taegliche Sicherung -
+                // unabhaengig davon, ob heute schon eine taegliche Sicherung
+                // lief. Ohne Anmeldung bleibt es beim lokalen Download oben.
+                if (speicherId === "onedrive" && angemeldet) {
+                  void sicherungsZiel.saveBackup(db, dateStamp()).catch((error) =>
+                    console.warn(`Sicherung vor Wiederherstellung fehlgeschlagen: ${String(error)}`),
+                  );
+                }
                 setDb(importVorschau.db);
                 setImportVorschau(null);
               }}

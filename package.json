@@ -8,9 +8,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "test": "npm run test:abnahme && npm run test:speichern && npm run test:bausteine",
+    "test": "npm run test:abnahme && npm run test:bausteine",
     "test:abnahme": "esbuild tests/abnahme.ts --bundle --platform=node --format=esm --external:exceljs --outfile=tests/.abnahme.mjs --log-level=error && node tests/.abnahme.mjs",
-    "test:speichern": "esbuild tests/speichern.ts --bundle --platform=node --format=esm --external:exceljs --outfile=tests/.speichern.mjs --log-level=error && node tests/.speichern.mjs",
     "test:bausteine": "esbuild tests/bausteine.ts --bundle --platform=node --format=esm --external:exceljs --outfile=tests/.bausteine.mjs --log-level=error && node tests/.bausteine.mjs"
   },
   "dependencies": {

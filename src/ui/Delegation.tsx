@@ -110,3 +110,78 @@ export function Delegationsdialog({
     </dialog>
   );
 }
+
+/** Nachverfolgung (Paket A): derselbe Text wie bei der Delegation, aber ohne
+ *  Bestaetigungsschritt - "Nachfrage vermerken" legt nur einen Verlaufseintrag
+ *  an. Kein Automatikversand, keine neue Delegation. */
+export function Nachfragedialog({
+  db,
+  type,
+  item,
+  ticketTitle,
+  onVermerken,
+  onSchliessen,
+}: {
+  db: Database;
+  type: EntityType;
+  item: WorkItem;
+  ticketTitle?: string;
+  onVermerken: (text: string) => void;
+  onSchliessen: () => void;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  const [kopiert, setKopiert] = useState(false);
+  const { text, luecken } = buildMailText(db, type, item, ticketTitle);
+
+  useEffect(() => {
+    dialog.current?.showModal();
+  }, []);
+
+  async function kopieren() {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // Zwischenablage nicht verfuegbar - der Text steht sichtbar im Dialog.
+    }
+    setKopiert(true);
+  }
+
+  return (
+    <dialog ref={dialog} onClose={onSchliessen}>
+      <h2>Nachfragen bei {valueLabel(db, item.leadId)}</h2>
+
+      {luecken.map((luecke, index) => (
+        <div key={index} className="hinweis warnung">
+          {luecke}
+        </div>
+      ))}
+
+      <pre className="mailtext">{text}</pre>
+
+      <div className="knopfreihe">
+        <button type="button" className="zweit" onClick={kopieren}>
+          {kopiert ? "Kopiert" : "Text kopieren"}
+        </button>
+      </div>
+
+      <div className="knopfreihe">
+        <button
+          type="button"
+          className="haupt"
+          onClick={() => {
+            onVermerken(text);
+            dialog.current?.close();
+          }}
+        >
+          Nachfrage vermerken
+        </button>
+        <button type="button" className="zweit" onClick={() => dialog.current?.close()}>
+          Schließen
+        </button>
+      </div>
+      <div className="status-zeile" style={{ marginTop: 8 }}>
+        Vermerkt nur im Verlauf – die App verschickt nichts selbst. Telefonisch nachgefragt? Trotzdem hier vermerken.
+      </div>
+    </dialog>
+  );
+}

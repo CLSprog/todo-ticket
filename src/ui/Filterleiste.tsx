@@ -118,6 +118,38 @@ export function Filterleiste({
               onChange={(prioritaeten) => setze({ prioritaeten })}
             />
           </Feld>
+          <div className="feldgitter">
+            <Feld label="Solltermin von">
+              <input
+                type="date"
+                value={filter.solltermVon ?? ""}
+                onChange={(event) => setze({ solltermVon: event.target.value || null })}
+              />
+            </Feld>
+            <Feld label="Solltermin bis">
+              <input
+                type="date"
+                value={filter.solltermBis ?? ""}
+                onChange={(event) => setze({ solltermBis: event.target.value || null })}
+              />
+            </Feld>
+          </div>
+          <div className="feldgitter">
+            <Feld label="Erledigt von">
+              <input
+                type="date"
+                value={filter.erledigtVon ?? ""}
+                onChange={(event) => setze({ erledigtVon: event.target.value || null })}
+              />
+            </Feld>
+            <Feld label="Erledigt bis">
+              <input
+                type="date"
+                value={filter.erledigtBis ?? ""}
+                onChange={(event) => setze({ erledigtBis: event.target.value || null })}
+              />
+            </Feld>
+          </div>
         </div>
       </details>
     </div>

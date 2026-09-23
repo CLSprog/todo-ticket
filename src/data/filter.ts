@@ -7,7 +7,7 @@
 
 import { assignmentValueIds, hintsFor, isOpen, matchesPerson } from "./derive";
 import { tasksOfTicket } from "./db";
-import type { AssignmentKind, Database, ID, PersonRole, Task, Ticket, WorkItem } from "./types";
+import type { AssignmentKind, Database, ID, ISODate, PersonRole, Task, Ticket, WorkItem } from "./types";
 
 export type QuickView =
   | "alle"
@@ -29,6 +29,12 @@ export interface FilterState {
   person: ID | null;
   personRolle: PersonRole | "Alle";
   prioritaeten: string[];
+  /** Solltermin-Bereich (Paket B). Beide Grenzen einschliesslich, leer = offen. */
+  solltermVon: ISODate | null;
+  solltermBis: ISODate | null;
+  /** Erledigungsdatum-Bereich (Paket B). Greift nur bei Vorgaengen mit completedAt. */
+  erledigtVon: ISODate | null;
+  erledigtBis: ISODate | null;
 }
 
 export const LEERER_FILTER: FilterState = {
@@ -41,6 +47,10 @@ export const LEERER_FILTER: FilterState = {
   person: null,
   personRolle: "Alle",
   prioritaeten: [],
+  solltermVon: null,
+  solltermBis: null,
+  erledigtVon: null,
+  erledigtBis: null,
 };
 
 export function filterAktiv(filter: FilterState): boolean {
@@ -51,8 +61,33 @@ export function filterAktiv(filter: FilterState): boolean {
     filter.besprechungen.length > 0 ||
     filter.arbeitsarten.length > 0 ||
     filter.person !== null ||
-    filter.prioritaeten.length > 0
+    filter.prioritaeten.length > 0 ||
+    filter.solltermVon !== null ||
+    filter.solltermBis !== null ||
+    filter.erledigtVon !== null ||
+    filter.erledigtBis !== null
   );
+}
+
+/** Paket B: reiner Kontextbezug fuer "Als Nächstes" - nur Zuordnungen und
+ *  Person zaehlen als Kontext, nicht Schnellansicht/Text/Priorität/Datum. */
+export function kontextAktiv(filter: FilterState): boolean {
+  return (
+    filter.projekte.length > 0 ||
+    filter.themen.length > 0 ||
+    filter.besprechungen.length > 0 ||
+    filter.arbeitsarten.length > 0 ||
+    filter.person !== null
+  );
+}
+
+export function passtKontext(db: Database, item: WorkItem, ticketId: ID | undefined, filter: FilterState): boolean {
+  if (!passtZuordnung(db, item, ticketId, "Projekt", filter.projekte)) return false;
+  if (!passtZuordnung(db, item, ticketId, "Thema", filter.themen)) return false;
+  if (!passtZuordnung(db, item, ticketId, "Besprechungskreis", filter.besprechungen)) return false;
+  if (!passtZuordnung(db, item, ticketId, "Arbeitsart", filter.arbeitsarten)) return false;
+  if (filter.person && !matchesPerson(db, item, ticketId, filter.person, filter.personRolle)) return false;
+  return true;
 }
 
 function passtZuordnung(
@@ -102,6 +137,17 @@ function passtSchnellansicht(db: Database, item: WorkItem, ticketId: ID | undefi
   }
 }
 
+/** Liegt datum (falls gesetzt) in [von, bis]? Ohne beide Grenzen immer wahr;
+ *  mit Grenzen und ohne Datum immer falsch - kein Termin passt in keinen
+ *  eingegrenzten Zeitraum. */
+function imZeitraum(datum: ISODate | null, von: ISODate | null, bis: ISODate | null): boolean {
+  if (!von && !bis) return true;
+  if (!datum) return false;
+  if (von && datum < von) return false;
+  if (bis && datum > bis) return false;
+  return true;
+}
+
 export function passt(db: Database, item: WorkItem, ticketId: ID | undefined, filter: FilterState): boolean {
   if (item.deletedAt) return false;
   if (!passtSchnellansicht(db, item, ticketId, filter.quick)) return false;
@@ -112,6 +158,9 @@ export function passt(db: Database, item: WorkItem, ticketId: ID | undefined, fi
   if (!passtZuordnung(db, item, ticketId, "Besprechungskreis", filter.besprechungen)) return false;
   if (!passtZuordnung(db, item, ticketId, "Arbeitsart", filter.arbeitsarten)) return false;
   if (filter.person && !matchesPerson(db, item, ticketId, filter.person, filter.personRolle)) return false;
+  if (!imZeitraum(item.dueDate, filter.solltermVon, filter.solltermBis)) return false;
+  if (!imZeitraum(item.completedAt ? item.completedAt.slice(0, 10) : null, filter.erledigtVon, filter.erledigtBis))
+    return false;
   return true;
 }
 

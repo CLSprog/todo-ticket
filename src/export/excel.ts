@@ -78,6 +78,11 @@ export async function buildWorkbook(db: Database): Promise<ExcelJS.Workbook> {
       column.width = Math.min(42, Math.max(12, String(column.values?.[1] ?? "").length + 4));
     });
     sheet.views = [{ state: "frozen", ySplit: 1 }];
+    // Paket B/C: Autofilter auf der Kopfzeile, damit das Blatt in Excel direkt
+    // filterbar ist statt einer reinen Werteliste.
+    if (kopf.length > 0) {
+      sheet.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: kopf.length } };
+    }
   }
 
   // Metadaten als Schluessel/Wert-Blatt (Kapitel 15).

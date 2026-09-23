@@ -7,9 +7,10 @@
 import { useState } from "react";
 import { Feld, Hinweise, Marke, Mehrfachauswahl } from "./Teile";
 import { Personenfeld, Personenmehrfachfeld } from "./Personenfeld";
-import { Delegationsdialog } from "./Delegation";
+import { Delegationsdialog, Nachfragedialog } from "./Delegation";
 import { effectiveAssignments, hintsFor, isOpen, needsDelegation } from "../data/derive";
-import { assignmentsOf, eventsOf, tasksOfTicket, valueLabel, valuesOfGroup } from "../data/db";
+import { assignmentsOf, eventsOf, referencesOf, tasksOfTicket, valueLabel, valuesOfGroup } from "../data/db";
+import { offeneVorschlaege } from "../data/suggestions";
 import { formatDate, formatTimestamp } from "../data/dates";
 import {
   ASSIGNMENT_KINDS,
@@ -30,12 +31,18 @@ export interface DetailAktionen {
   zuordnen: (type: EntityType, id: ID, kind: AssignmentKind, valueIds: ID[]) => void;
   delegationBestaetigen: (type: EntityType, id: ID, empfaengerId: ID, text: string) => void;
   erneutDelegieren: (type: EntityType, id: ID) => void;
+  nachfrage: (type: EntityType, id: ID, text: string) => void;
   abschliessen: (type: EntityType, id: ID, ergebnis: string) => void;
-  wiederOeffnen: (type: EntityType, id: ID) => void;
+  wiederOeffnen: (type: EntityType, id: ID, grund: string) => void;
   aufgabeAnlegen: (ticketId: ID, titel: string) => void;
   folgeaufgabe: (taskId: ID, titel: string, ergebnis: string) => void;
   notiz: (type: EntityType, id: ID, text: string) => void;
   loeschen: (type: EntityType, id: ID) => void;
+  referenzAnlegen: (type: EntityType, id: ID, label: string, uri: string) => void;
+  referenzEntfernen: (referenceId: ID) => void;
+  vorschlagBestaetigen: (suggestionId: ID) => void;
+  vorschlagVerwerfen: (suggestionId: ID) => void;
+  vorschlaegeAktualisieren: (type: EntityType, id: ID) => void;
   /** Legt eine neue Person an und liefert deren ID sofort zurueck. */
   personAnlegen: (label: string) => ID;
 }
@@ -86,7 +93,7 @@ function Kopfdaten({
           onChange={(event) => {
             const status = event.target.value as Status;
             if (status === "Erledigt") aktionen.abschliessen(type, item.id, "");
-            else if (item.status === "Erledigt") aktionen.wiederOeffnen(type, item.id);
+            else if (item.status === "Erledigt") aktionen.wiederOeffnen(type, item.id, "");
             else aktionen.aendern(type, item.id, { status });
           }}
         >
@@ -180,6 +187,138 @@ function Verlauf({ db, id }: { db: Database; id: ID }) {
   );
 }
 
+/** Quellen und Links (Paket A). Nur Verweise - keine Dateiuebernahme, siehe
+ *  P08_Umsetzungsvorschlag-A-D V01-00. */
+function Referenzen({
+  db,
+  type,
+  id,
+  aktionen,
+}: {
+  db: Database;
+  type: EntityType;
+  id: ID;
+  aktionen: DetailAktionen;
+}) {
+  const [label, setLabel] = useState("");
+  const [uri, setUri] = useState("");
+  const referenzen = referencesOf(db, id);
+
+  function anlegen() {
+    if (!label.trim() && !uri.trim()) return;
+    aktionen.referenzAnlegen(type, id, label, uri);
+    setLabel("");
+    setUri("");
+  }
+
+  return (
+    <div>
+      {referenzen.length === 0 && <div className="status-zeile">Keine Quellen oder Links hinterlegt.</div>}
+      {referenzen.length > 0 && (
+        <ul className="verlauf">
+          {referenzen.map((ref) => (
+            <li key={ref.id}>
+              {ref.uri ? (
+                <a href={ref.uri} target="_blank" rel="noreferrer">
+                  {ref.label || ref.uri}
+                </a>
+              ) : (
+                <span>{ref.label}</span>
+              )}{" "}
+              <button
+                type="button"
+                className="zweit"
+                style={{ padding: "2px 8px", fontSize: 12 }}
+                onClick={() => aktionen.referenzEntfernen(ref.id)}
+              >
+                entfernen
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+        <input
+          type="text"
+          placeholder="Bezeichnung"
+          value={label}
+          onChange={(event) => setLabel(event.target.value)}
+          style={{ flex: 1, minWidth: 140, padding: 8, borderRadius: 8, border: "1px solid var(--line)", background: "var(--bg)", color: "var(--text)", font: "inherit" }}
+        />
+        <input
+          type="text"
+          placeholder="Link oder Ablageort"
+          value={uri}
+          onChange={(event) => setUri(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") anlegen();
+          }}
+          style={{ flex: 2, minWidth: 180, padding: 8, borderRadius: 8, border: "1px solid var(--line)", background: "var(--bg)", color: "var(--text)", font: "inherit" }}
+        />
+        <button type="button" className="zweit" disabled={!label.trim() && !uri.trim()} onClick={anlegen}>
+          Hinzufügen
+        </button>
+      </div>
+      <div className="status-zeile" style={{ marginTop: 6 }}>
+        Nur ein Verweis – Dateien werden nicht in die App übernommen.
+      </div>
+    </div>
+  );
+}
+
+/** K01: Regelbasierte Vorschlaege (Paket B) - Zuordnung per Stichwortabgleich
+ *  und Dublettenverdacht. Die Zuordnung wird erst beim Bestaetigen gesetzt,
+ *  nie automatisch (Regel K01: "bestätigen, ändern, verwerfen oder ignorieren"). */
+function Vorschlagsliste({
+  db,
+  type,
+  id,
+  aktionen,
+}: {
+  db: Database;
+  type: EntityType;
+  id: ID;
+  aktionen: DetailAktionen;
+}) {
+  const vorschlaege = offeneVorschlaege(db, id);
+  return (
+    <div>
+      {vorschlaege.length === 0 && <div className="status-zeile">Keine offenen Vorschläge.</div>}
+      {vorschlaege.length > 0 && (
+        <ul className="verlauf">
+          {vorschlaege.map((v) => (
+            <li key={v.id}>
+              {v.field === "Dublette" ? "Mögliche Dublette – " : `Zuordnung „${v.field}“ – `}
+              {v.reason}
+              <div className="knopfreihe" style={{ marginTop: 4 }}>
+                <button
+                  type="button"
+                  className="zweit"
+                  style={{ padding: "2px 8px", fontSize: 12 }}
+                  onClick={() => aktionen.vorschlagBestaetigen(v.id)}
+                >
+                  Bestätigen
+                </button>
+                <button
+                  type="button"
+                  className="zweit"
+                  style={{ padding: "2px 8px", fontSize: 12 }}
+                  onClick={() => aktionen.vorschlagVerwerfen(v.id)}
+                >
+                  Verwerfen
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+      <button type="button" className="zweit" style={{ marginTop: 8 }} onClick={() => aktionen.vorschlaegeAktualisieren(type, id)}>
+        Vorschläge prüfen
+      </button>
+    </div>
+  );
+}
+
 function Aufgabenblock({
   db,
   ticket,
@@ -197,6 +336,8 @@ function Aufgabenblock({
   const [folgeTitel, setFolgeTitel] = useState("");
   const [folgeErgebnis, setFolgeErgebnis] = useState("");
   const [offeneAufgabe, setOffeneAufgabe] = useState<ID | null>(null);
+  const [wiederOeffnenGrund, setWiederOeffnenGrund] = useState("");
+  const [nachfrageFuer, setNachfrageFuer] = useState<Task | null>(null);
 
   return (
     <div>
@@ -264,6 +405,17 @@ function Aufgabenblock({
                   <Zuordnungen db={db} type="Aufgabe" item={task} ticketId={ticket.id} aktionen={aktionen} />
                 </details>
                 <details className="mehr">
+                  <summary>Quellen und Links</summary>
+                  <Referenzen db={db} type="Aufgabe" id={task.id} aktionen={aktionen} />
+                </details>
+                <details className="mehr">
+                  <summary>
+                    Vorschläge
+                    {offeneVorschlaege(db, task.id).length > 0 ? ` (${offeneVorschlaege(db, task.id).length})` : ""}
+                  </summary>
+                  <Vorschlagsliste db={db} type="Aufgabe" id={task.id} aktionen={aktionen} />
+                </details>
+                <details className="mehr">
                   <summary>Verlauf</summary>
                   <Verlauf db={db} id={task.id} />
                 </details>
@@ -277,6 +429,11 @@ function Aufgabenblock({
                   {task.delegatedAt && isOpen(task) && (
                     <button type="button" className="zweit" onClick={() => aktionen.erneutDelegieren("Aufgabe", task.id)}>
                       Erneut delegieren
+                    </button>
+                  )}
+                  {task.delegatedAt && isOpen(task) && (
+                    <button type="button" className="zweit" onClick={() => setNachfrageFuer(task)}>
+                      Nachfragen
                     </button>
                   )}
                   {isOpen(task) && (
@@ -298,7 +455,14 @@ function Aufgabenblock({
                     </>
                   )}
                   {task.status === "Erledigt" && (
-                    <button type="button" className="zweit" onClick={() => aktionen.wiederOeffnen("Aufgabe", task.id)}>
+                    <button
+                      type="button"
+                      className="zweit"
+                      onClick={() => {
+                        aktionen.wiederOeffnen("Aufgabe", task.id, wiederOeffnenGrund);
+                        setWiederOeffnenGrund("");
+                      }}
+                    >
                       Wieder öffnen
                     </button>
                   )}
@@ -306,6 +470,15 @@ function Aufgabenblock({
                     Löschen
                   </button>
                 </div>
+
+                {task.status === "Erledigt" && (
+                  <Feld label="Grund der Wiederöffnung (optional)">
+                    <textarea
+                      value={wiederOeffnenGrund}
+                      onChange={(event) => setWiederOeffnenGrund(event.target.value)}
+                    />
+                  </Feld>
+                )}
 
                 {folgeVon === task.id && (
                   <div className="karte" style={{ background: "var(--bg)" }}>
@@ -342,6 +515,17 @@ function Aufgabenblock({
           </div>
         );
       })}
+
+      {nachfrageFuer && (
+        <Nachfragedialog
+          db={db}
+          type="Aufgabe"
+          item={nachfrageFuer}
+          ticketTitle={ticket.title}
+          onVermerken={(text) => aktionen.nachfrage("Aufgabe", nachfrageFuer.id, text)}
+          onSchliessen={() => setNachfrageFuer(null)}
+        />
+      )}
     </div>
   );
 }
@@ -358,8 +542,10 @@ export function Ticketdetail({
   onZurueck: () => void;
 }) {
   const [delegation, setDelegation] = useState<{ type: EntityType; item: WorkItem } | null>(null);
+  const [nachfrage, setNachfrage] = useState(false);
   const [notiz, setNotiz] = useState("");
   const [abschlussErgebnis, setAbschlussErgebnis] = useState("");
+  const [wiederOeffnenGrund, setWiederOeffnenGrund] = useState("");
   const offeneAufgaben = tasksOfTicket(db, ticket.id).filter((task) => task.status !== "Erledigt");
   const alleErledigt = tasksOfTicket(db, ticket.id).length > 0 && offeneAufgaben.length === 0;
 
@@ -418,6 +604,19 @@ export function Ticketdetail({
           <Zuordnungen db={db} type="Ticket" item={ticket} aktionen={aktionen} />
         </details>
 
+        <details className="mehr">
+          <summary>Quellen und Links</summary>
+          <Referenzen db={db} type="Ticket" id={ticket.id} aktionen={aktionen} />
+        </details>
+
+        <details className="mehr">
+          <summary>
+            Vorschläge
+            {offeneVorschlaege(db, ticket.id).length > 0 ? ` (${offeneVorschlaege(db, ticket.id).length})` : ""}
+          </summary>
+          <Vorschlagsliste db={db} type="Ticket" id={ticket.id} aktionen={aktionen} />
+        </details>
+
         <div className="knopfreihe">
           {needsDelegation(ticket) && (
             <button type="button" className="haupt" onClick={() => setDelegation({ type: "Ticket", item: ticket })}>
@@ -429,8 +628,20 @@ export function Ticketdetail({
               Erneut delegieren
             </button>
           )}
+          {ticket.delegatedAt && isOpen(ticket) && (
+            <button type="button" className="zweit" onClick={() => setNachfrage(true)}>
+              Nachfragen
+            </button>
+          )}
           {ticket.status === "Erledigt" ? (
-            <button type="button" className="zweit" onClick={() => aktionen.wiederOeffnen("Ticket", ticket.id)}>
+            <button
+              type="button"
+              className="zweit"
+              onClick={() => {
+                aktionen.wiederOeffnen("Ticket", ticket.id, wiederOeffnenGrund);
+                setWiederOeffnenGrund("");
+              }}
+            >
               Ticket wieder öffnen
             </button>
           ) : (
@@ -462,6 +673,11 @@ export function Ticketdetail({
         {ticket.status !== "Erledigt" && (
           <Feld label="Ergebnis beim Abschluss (optional)">
             <textarea value={abschlussErgebnis} onChange={(event) => setAbschlussErgebnis(event.target.value)} />
+          </Feld>
+        )}
+        {ticket.status === "Erledigt" && (
+          <Feld label="Grund der Wiederöffnung (optional)">
+            <textarea value={wiederOeffnenGrund} onChange={(event) => setWiederOeffnenGrund(event.target.value)} />
           </Feld>
         )}
       </div>
@@ -507,6 +723,16 @@ export function Ticketdetail({
           }
           onSchliessen={() => setDelegation(null)}
           onPersonAnlegen={aktionen.personAnlegen}
+        />
+      )}
+
+      {nachfrage && (
+        <Nachfragedialog
+          db={db}
+          type="Ticket"
+          item={ticket}
+          onVermerken={(text) => aktionen.nachfrage("Ticket", ticket.id, text)}
+          onSchliessen={() => setNachfrage(false)}
         />
       )}
     </div>

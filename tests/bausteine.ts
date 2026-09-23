@@ -33,7 +33,8 @@ import {
   alleEntschieden,
 } from "../src/bausteine/B04-C06_Konfliktdialog_V01-01";
 import { erzeugeSperre, nurEinerGleichzeitig, nacheinander } from "../src/bausteine/B04-C08_Speichersperre_V01-00";
-import { Speicherwerk, zustandText, type Anzeige } from "../src/bausteine/B04-C09_Speicherwerk_V01-00";
+import { Speicherwerk, zustandText, type Anzeige } from "../src/bausteine/B04-C09_Speicherwerk_V01-01";
+import { erzeugeLokalSpeicher } from "../src/storage/lokalSpeicher";
 
 let bestanden = 0;
 const fehler: string[] = [];
@@ -1117,8 +1118,10 @@ async function main() {
     );
   }
 
-  // --- G07 uebernehmeEntscheidung schreibt unbedingt und aktualisiert den
-  //         gemerkten Cloud-Stand, sodass ein Zwischenstand nicht mehr zaehlt -
+  // --- G07 uebernehmeEntscheidung schreibt (V01-01: bedingt) und aktualisiert
+  //         den gemerkten Cloud-Stand, sodass ein Zwischenstand nicht mehr
+  //         zaehlt. Ohne Einmischung eines Dritten gelingt der erste
+  //         bedingte Schreibversuch, das Ergebnis bleibt wie in V01-00. -----
   {
     const speicher = erzeugeSpeicherAttrappe("ordner", "attrappe:g07");
     const auf = { anzeigen: [] as Anzeige[], konflikte: 0, uebernahmen: [] as GBestand[] };
@@ -1140,7 +1143,119 @@ async function main() {
     pruefe("G07.3", auf.konflikte === 0, "kein falscher Konflikt nach der Entscheidung");
   }
 
-  // --- G08 zustandText deckt jeden Zustand ab ---------------------------------
+  // --- G09 Ein DRITTES Geraet schreibt zwischen Konflikterkennung und
+  //         Entscheidung ein ANDERES Feld: die Entscheidung wird nicht
+  //         verworfen, der Beitrag des Dritten geht nicht verloren, keine
+  //         zusaetzliche Konfliktrunde. Antwort auf den Einwand vom
+  //         22.09.2026 zu C01 V02-00: genau der Nachweis, dass ein nach einer
+  //         Konfliktentscheidung geschriebener Stand nicht mehr ungeschuetzt
+  //         ist. ---------------------------------------------------------
+  {
+    const speicher = erzeugeSpeicherAttrappe("ordner", "attrappe:g09");
+    const aufA = { anzeigen: [] as Anzeige[], konflikte: 0, uebernahmen: [] as GBestand[] };
+    const aufB = { anzeigen: [] as Anzeige[], konflikte: 0, uebernahmen: [] as GBestand[] };
+    const werkA = neuesWerk(speicher, aufA, "raumA9");
+    const werkB = neuesWerk(speicher, aufB, "raumB9");
+
+    await werkA.laden();
+    werkA.aendern(gBasis());
+    await werkA.jetztSpeichern();
+
+    await werkB.laden();
+    werkB.aendern({ ...gBasis(), tickets: [{ ...gBasis().tickets[0], frist: "B-Termin" }] });
+    await werkB.jetztSpeichern();
+
+    // Geraet A kennt noch die Ausgangsfassung, aendert dasselbe Feld wie B:
+    // echter Konflikt, geht an beiKonflikt.
+    werkA.aendern({ ...gBasis(), tickets: [{ ...gBasis().tickets[0], frist: "A-Termin" }] });
+    await werkA.jetztSpeichern();
+    pruefe("G09.1", aufA.konflikte === 1, "Konflikt auf 'frist' erkannt, eine Runde");
+
+    // WAEHREND der Mensch entscheidet, schreibt ein drittes Geraet C ein
+    // ANDERES Feld (titel) - unmittelbar in die Ablage, nicht ueber ein
+    // Speicherwerk (steht fuer irgendein drittes Geraet, das nichts von der
+    // laufenden Entscheidung weiss).
+    const vorC = (await speicher.lesenMitStand<GBestand>("stand.json", "ordner")).daten!;
+    await speicher.schreiben(
+      { ...vorC, tickets: [{ ...vorC.tickets[0], titel: "C-Titel" }] },
+      "stand.json",
+      "ordner",
+    );
+
+    // Der Mensch entscheidet 'frist', kennt 'titel' nur aus dem Stand, auf
+    // dem der Konfliktdialog beruhte (noch ohne C).
+    const entschieden = { ...gBasis(), tickets: [{ ...gBasis().tickets[0], frist: "ENTSCHIEDEN" }] };
+    await werkA.uebernehmeEntscheidung(entschieden);
+
+    pruefe("G09.2", aufA.konflikte === 1, "kein zusaetzlicher Konflikt - 'titel' war nicht umstritten");
+    pruefe(
+      "G09.3",
+      aufA.anzeigen.at(-1)?.zustand === "gespeichert",
+      "die Entscheidung kommt trotzdem zur Ruhe",
+      aufA.anzeigen.at(-1),
+    );
+    const stand = (await speicher.lesen<GBestand>("stand.json", "ordner"))!;
+    pruefe(
+      "G09.4",
+      stand.tickets[0].frist === "ENTSCHIEDEN" && stand.tickets[0].titel === "C-Titel",
+      "die Entscheidung UND der Beitrag des dritten Geraets stecken beide im Ergebnis",
+      stand,
+    );
+  }
+
+  // --- G10 Ein DRITTES Geraet aendert zwischen Konflikterkennung und
+  //         Entscheidung GENAU DASSELBE Feld erneut: die Entscheidung darf
+  //         NICHT einfach druebergeschrieben werden - es muss eine weitere,
+  //         weiterhin ausganglose Konfliktrunde entstehen. Das ist der
+  //         Kernpunkt des Einwands: ohne diese Pruefung wuerde C09 die
+  //         Entscheidung des Menschen unbedingt schreiben und den Beitrag
+  //         des Dritten stillschweigend verwerfen. ------------------------
+  {
+    const speicher = erzeugeSpeicherAttrappe("ordner", "attrappe:g10");
+    const aufA = { anzeigen: [] as Anzeige[], konflikte: 0, uebernahmen: [] as GBestand[] };
+    const aufB = { anzeigen: [] as Anzeige[], konflikte: 0, uebernahmen: [] as GBestand[] };
+    const werkA = neuesWerk(speicher, aufA, "raumA10");
+    const werkB = neuesWerk(speicher, aufB, "raumB10");
+
+    await werkA.laden();
+    werkA.aendern(gBasis());
+    await werkA.jetztSpeichern();
+    await werkB.laden();
+    werkB.aendern({ ...gBasis(), tickets: [{ ...gBasis().tickets[0], frist: "B-Termin" }] });
+    await werkB.jetztSpeichern();
+    werkA.aendern({ ...gBasis(), tickets: [{ ...gBasis().tickets[0], frist: "A-Termin" }] });
+    await werkA.jetztSpeichern();
+    pruefe("G10.1", aufA.konflikte === 1, "erste Konfliktrunde auf 'frist'");
+
+    // Drittes Geraet C aendert waehrend der Entscheidung DASSELBE Feld noch
+    // einmal.
+    const vorC = (await speicher.lesenMitStand<GBestand>("stand.json", "ordner")).daten!;
+    await speicher.schreiben(
+      { ...vorC, tickets: [{ ...vorC.tickets[0], frist: "C-Termin" }] },
+      "stand.json",
+      "ordner",
+    );
+
+    const entschieden = { ...gBasis(), tickets: [{ ...gBasis().tickets[0], frist: "ENTSCHIEDEN" }] };
+    await werkA.uebernehmeEntscheidung(entschieden);
+
+    pruefe("G10.2", aufA.konflikte === 2, "eine zweite Konfliktrunde entsteht - die Entscheidung reicht nicht mehr");
+    pruefe(
+      "G10.3",
+      aufA.anzeigen.at(-1)?.zustand === "fehler-cloud" && aufA.anzeigen.at(-1)?.wiederholbar === false,
+      "verlangt erneut eine Entscheidung, kein automatischer Versuch",
+      aufA.anzeigen.at(-1),
+    );
+    const stand = (await speicher.lesen<GBestand>("stand.json", "ordner"))!;
+    pruefe(
+      "G10.4",
+      stand.tickets[0].frist === "C-Termin",
+      "die Entscheidung wurde NICHT ungeprueft ueber den Beitrag des Dritten geschrieben",
+      stand,
+    );
+  }
+
+  // --- G11 zustandText deckt jeden Zustand ab ---------------------------------
   {
     const zustaende: Array<Anzeige["zustand"]> = [
       "geladen",
@@ -1152,10 +1267,56 @@ async function main() {
       "fehler-lokal",
     ];
     pruefe(
-      "G08.1",
+      "G11.1",
       zustaende.every((z) => typeof zustandText(z) === "string" && zustandText(z).length > 0),
       "jeder Zustand hat einen Text",
     );
+  }
+
+  // --- L: erzeugeLokalSpeicher erfuellt den CloudSpeicher-Vertrag (Schritt 9) -
+  {
+    const speicher = erzeugeLokalSpeicher(`test_${Date.now()}_`);
+
+    const fehlt = await speicher.standHolen("daten.json");
+    pruefe("L01", fehlt.vorhanden === false, "Nicht vorhandene Datei meldet sich als fehlend");
+    pruefe("L01", (await speicher.lesen("daten.json")) === null, "Lesen einer fehlenden Datei liefert null");
+
+    const erst = await speicher.bedingtSchreiben({ w: 1 }, "daten.json", null);
+    pruefe("L02", erst.erfolg, "Erstanlage gegen erwartet=null gelingt");
+    const zweiteErstanlage = await speicher.bedingtSchreiben({ w: 2 }, "daten.json", null);
+    pruefe("L02", !zweiteErstanlage.erfolg && zweiteErstanlage.grund === "schonVorhanden", "Zweite Erstanlage wird abgelehnt (schonVorhanden)");
+
+    const gelesen = await speicher.lesenMitStand<{ w: number }>("daten.json");
+    pruefe("L03", gelesen.daten?.w === 1, "lesenMitStand liefert den geschriebenen Inhalt");
+    pruefe("L03", gelesen.stand.vorhanden && gelesen.stand.inhaltskennung !== null, "lesenMitStand liefert einen Stand");
+
+    const mitGueltigemStand = await speicher.bedingtSchreiben({ w: 3 }, "daten.json", gelesen.stand);
+    pruefe("L04", mitGueltigemStand.erfolg, "Schreiben mit gültigem Stand gelingt");
+
+    const mitVeraltetemStand = await speicher.bedingtSchreiben({ w: 4 }, "daten.json", gelesen.stand);
+    pruefe("L05", !mitVeraltetemStand.erfolg && mitVeraltetemStand.grund === "konflikt", "Schreiben mit veraltetem Stand wird als Konflikt abgelehnt");
+    pruefe("L05", (await speicher.lesen<{ w: number }>("daten.json"))?.w === 3, "Der abgelehnte Schreibversuch hat nichts verändert");
+
+    await speicher.schreiben({ w: 5 }, "andere.json", "Unterordner");
+    const liste = await speicher.auflisten("Unterordner");
+    pruefe("L06", liste.includes("andere.json"), "auflisten() findet die Datei im angegebenen Ordner");
+    const wurzel = await speicher.auflisten();
+    pruefe("L06", !wurzel.includes("andere.json"), "Ordner werden dabei nicht vermischt");
+
+    await speicher.loeschen("daten.json");
+    pruefe("L07", (await speicher.standHolen("daten.json")).vorhanden === false, "Nach dem Löschen gilt die Datei als fehlend");
+    const erneuteErstanlage = await speicher.bedingtSchreiben({ w: 6 }, "daten.json", null);
+    pruefe("L07", erneuteErstanlage.erfolg, "Nach dem Löschen ist eine neue Erstanlage wieder möglich");
+
+    let ordnerFehler = false;
+    try {
+      await speicher.ordnerSicherstellen("Beliebiger/Ordner");
+    } catch {
+      ordnerFehler = true;
+    }
+    pruefe("L08", !ordnerFehler, "ordnerSicherstellen() ist für lokal ein folgenloses No-Op");
+
+    pruefe("L09", speicher.kennung === "lokal", "Die Kennung identifiziert den lokalen Speicher");
   }
 
   // ===========================================================================

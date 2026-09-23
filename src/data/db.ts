@@ -137,20 +137,22 @@ export function createAssignment(
   };
 }
 
+/** Quelle/Verweis (Paket A): nur ein Link oder eine Fundstelle als Text, keine
+ *  Dateiuebernahme - siehe P08_Umsetzungsvorschlag-A-D V01-00. */
 export function createReference(
   entityType: EntityType,
   entityId: ID,
-  sourceType: string,
   label: string,
   uri: string,
+  sourceType = "Link",
 ): Reference {
   return {
     id: newId(),
     entityType,
     entityId,
     sourceType,
-    label,
-    uri,
+    label: label.trim(),
+    uri: uri.trim(),
     updatedAt: nowTimestamp(),
     deletedAt: null,
   };

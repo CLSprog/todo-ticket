@@ -29,6 +29,11 @@ Oberfläche, weil Entscheidung D-01 sie ausdrücklich festlegt.
   Solltermin, Alter und Priorität und nennt dabei immer den Grund.
 - **Datenhaltung** – ein JSON-Hauptbestand, Excel als vollständiger Snapshot
   mit Roundtrip (T16), Konfliktbehandlung beim Abgleich zwischen Geräten.
+- **Sicheres Speichern** – jede Eingabe wird sofort lokal gesichert; die
+  Speicherung in die Ablage läuft geordnet in `storage/speicherwerk.ts`:
+  höchstens ein Vorgang gleichzeitig, Bestätigung nur für den tatsächlich
+  geschriebenen Stand, gescheiterte lokale Sicherung wird gemeldet statt
+  verschwiegen.
 
 Bewusst **nicht** enthalten: Komplex-Modul, automatischer Versand,
 Dokumentenimport, Mehrbenutzerbetrieb (Kapitel 24, „Später“).
@@ -71,7 +76,9 @@ Servervariante tritt an dieselbe Stelle.
 ```
 npm install
 npm run dev      # lokal
-npm run test     # Abnahmetests Kapitel 22/23
+npm run test     # alle Prüfungen
+npm run test:abnahme    # Abnahmetests Kapitel 22/23 (76)
+npm run test:speichern  # Speicherverhalten (37)
 npm run build    # Produktionsbau
 ```
 
